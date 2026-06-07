@@ -1,0 +1,9 @@
+torch>=2.2
+gymnasium>=0.29
+gymnasium-robotics>=1.2
+mujoco>=2.2
+numpy>=1.24
+imageio>=2.30
+imageio-ffmpeg>=0.4
+stable-baselines3>=2.3
+huggingface_hub>=0.20

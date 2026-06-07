@@ -1,0 +1,657 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+import imageio.v2 as imageio
+import numpy as np
+import torch
+from torch.nn import functional as F
+
+from .data import Normalizer, scripted_action
+from .envs import (
+    ObsSpec,
+    flatten_obs,
+    goal_reach_distance,
+    goal_state_from_state,
+    make_env,
+    obs_spec_from_env,
+)
+from .models import ActionConditionedJEPA
+from .tasks import resolve_task, task_dir
+
+
+def patch_numpy_pickle_aliases() -> None:
+    try:
+        import numpy.core as numpy_core
+    except ImportError:
+        return
+
+    import importlib
+    import sys
+
+    sys.modules.setdefault("numpy._core", numpy_core)
+    for name in ("numeric", "multiarray", "umath", "fromnumeric", "_multiarray_umath"):
+        try:
+            module = importlib.import_module(f"numpy.core.{name}")
+        except ImportError:
+            continue
+        sys.modules.setdefault(f"numpy._core.{name}", module)
+
+
+class Policy(Protocol):
+    name: str
+
+    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        ...
+
+
+@dataclass
+class RandomPolicy:
+    name: str = "random"
+
+    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        return env.action_space.sample().astype(np.float32)
+
+
+@dataclass
+class ScriptedGoalPolicy:
+    action_dim: int
+    controller: str
+    gain: float = 5.0
+    name: str = "scripted"
+
+    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        rng = np.random.default_rng(0)
+        action = scripted_action(obs, self.action_dim, self.gain, self.controller, env, rng)
+        return np.clip(action, env.action_space.low, env.action_space.high).astype(np.float32)
+
+
+class SB3Policy:
+    def __init__(self, path: Path, name: str = "sb3") -> None:
+        from stable_baselines3 import DDPG, PPO, SAC, TD3
+
+        patch_numpy_pickle_aliases()
+        self.name = name
+        custom_objects = {
+            "action_noise": None,
+            "replay_buffer": None,
+            "_last_obs": None,
+            "_last_episode_starts": None,
+            "_vec_normalize_env": None,
+        }
+        errors = []
+        for cls in (DDPG, SAC, TD3, PPO):
+            try:
+                self.model = cls.load(path, custom_objects=custom_objects)
+                self.name = f"{name}_{cls.__name__.lower()}"
+                return
+            except Exception as exc:  # pragma: no cover - depends on external checkpoints.
+                errors.append(f"{cls.__name__}: {exc}")
+        raise RuntimeError(f"Could not load SB3 checkpoint {path}: {'; '.join(errors)}")
+
+    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        action, _ = self.model.predict(obs, deterministic=True)
+        return np.asarray(action, dtype=np.float32)
+
+
+class JEPAMPCPolicy:
+    def __init__(
+        self,
+        *,
+        model: ActionConditionedJEPA,
+        normalizer: Normalizer,
+        spec: ObsSpec,
+        device: torch.device,
+        candidates: int,
+        horizon: int,
+        seed: int,
+        method: str = "random",
+        score_mode: str = "latent",
+        cem_iters: int = 3,
+        elite_frac: float = 0.1,
+        action_std: float = 0.7,
+        action_l2_weight: float = 0.0,
+        action_delta_weight: float = 0.0,
+        execute_smoothing: float = 0.0,
+        warm_start_cem: bool = True,
+        grad_iters: int = 30,
+        grad_lr: float = 0.08,
+        scripted_proposal_fraction: float = 0.0,
+        teacher_correction_fraction: float = 0.0,
+        teacher_correction_threshold: float = 0.0,
+        scripted_gain: float = 5.0,
+        scripted_controller: str = "reach",
+    ) -> None:
+        self.name = f"jepa_mpc_{method}_{score_mode}"
+        if action_l2_weight > 0.0 or action_delta_weight > 0.0 or execute_smoothing > 0.0:
+            self.name = f"{self.name}_smooth"
+        if scripted_proposal_fraction > 0.0:
+            proposal_pct = int(round(scripted_proposal_fraction * 100))
+            self.name = f"{self.name}_proposal{proposal_pct}"
+        if teacher_correction_fraction > 0.0:
+            teacher_pct = int(round(teacher_correction_fraction * 100))
+            if np.isinf(teacher_correction_threshold):
+                self.name = f"{self.name}_teacher{teacher_pct}"
+            else:
+                threshold_mm = int(round(teacher_correction_threshold * 1000))
+                self.name = f"{self.name}_teacher{teacher_pct}_{threshold_mm}mm"
+        self.model = model
+        self.normalizer = normalizer
+        self.spec = spec
+        self.device = device
+        self.candidates = candidates
+        self.horizon = horizon
+        self.method = method
+        self.score_mode = score_mode
+        self.cem_iters = cem_iters
+        self.elite_frac = elite_frac
+        self.action_std = action_std
+        self.action_l2_weight = action_l2_weight
+        self.action_delta_weight = action_delta_weight
+        self.execute_smoothing = execute_smoothing
+        self.warm_start_cem = warm_start_cem
+        self.grad_iters = grad_iters
+        self.grad_lr = grad_lr
+        self.scripted_proposal_fraction = scripted_proposal_fraction
+        self.teacher_correction_fraction = float(np.clip(teacher_correction_fraction, 0.0, 1.0))
+        self.teacher_correction_threshold = float(teacher_correction_threshold)
+        self.scripted_gain = scripted_gain
+        self.scripted_controller = scripted_controller
+        self.rng = np.random.default_rng(seed)
+        self.prev_action = np.zeros(spec.action_dim, dtype=np.float32)
+        self.prev_plan: np.ndarray | None = None
+
+    def _score_action_tensor(
+        self,
+        obs: dict[str, np.ndarray],
+        action_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        raw_state = flatten_obs(obs)
+        state = torch.from_numpy(self.normalizer.encode(raw_state)).unsqueeze(0).to(self.device)
+        z = self.model.encode(state).repeat(action_tensor.shape[0], 1)
+        pred_z = self.model.predict(z, action_tensor, self.horizon)
+
+        scores = torch.zeros(action_tensor.shape[0], dtype=pred_z.dtype, device=self.device)
+        if self.score_mode in ("latent", "combined"):
+            goal_state = goal_state_from_state(raw_state, self.spec)
+            goal_norm = torch.from_numpy(self.normalizer.encode(goal_state)).unsqueeze(0).to(self.device)
+            goal_z = self.model.encode_target(goal_norm)
+            latent_scores = torch.sum(
+                (F.normalize(pred_z, dim=-1) - F.normalize(goal_z, dim=-1)) ** 2,
+                dim=-1,
+            )
+            scores = scores + latent_scores
+        if self.score_mode in ("state", "combined"):
+            pred_state_norm = self.model.state_probe(pred_z)
+            pred_state = self.normalizer.decode_tensor(pred_state_norm)
+            achieved = pred_state[:, self.spec.obs_dim : self.spec.obs_dim + self.spec.goal_dim]
+            desired_start = self.spec.obs_dim + self.spec.goal_dim
+            desired = torch.as_tensor(
+                raw_state[desired_start : desired_start + self.spec.goal_dim],
+                dtype=pred_state.dtype,
+                device=pred_state.device,
+            ).unsqueeze(0)
+            state_scores = torch.linalg.norm(achieved - desired, dim=-1)
+            scores = scores + state_scores
+        if self.action_l2_weight > 0.0:
+            scores = scores + self.action_l2_weight * torch.mean(action_tensor.square(), dim=(1, 2))
+        if self.action_delta_weight > 0.0:
+            prev = torch.as_tensor(
+                self.prev_action,
+                dtype=action_tensor.dtype,
+                device=action_tensor.device,
+            ).view(1, 1, -1)
+            first_delta = action_tensor[:, :1] - prev
+            seq_delta = action_tensor[:, 1:] - action_tensor[:, :-1]
+            if seq_delta.numel() == 0:
+                delta_cost = torch.mean(first_delta.square(), dim=(1, 2))
+            else:
+                delta_cost = torch.cat([first_delta, seq_delta], dim=1).square().mean(dim=(1, 2))
+            scores = scores + self.action_delta_weight * delta_cost
+        return scores
+
+    def _score_sequences(
+        self,
+        obs: dict[str, np.ndarray],
+        action_seq: np.ndarray,
+    ) -> torch.Tensor:
+        return self._score_action_tensor(obs, torch.from_numpy(action_seq).to(self.device))
+
+    def _sample_uniform(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        low = env.action_space.low.astype(np.float32)
+        high = env.action_space.high.astype(np.float32)
+        action_seq = self.rng.uniform(
+            low, high, size=(self.candidates, self.horizon, self.spec.action_dim)
+        ).astype(np.float32)
+        self._inject_scripted_proposals(obs, env, action_seq)
+        return action_seq
+
+    def _inject_scripted_proposals(self, obs, env, action_seq: np.ndarray) -> None:
+        proposal_count = int(round(action_seq.shape[0] * self.scripted_proposal_fraction))
+        if proposal_count <= 0:
+            return
+        low = env.action_space.low.astype(np.float32)
+        high = env.action_space.high.astype(np.float32)
+        scripted = scripted_action(
+            obs,
+            self.spec.action_dim,
+            self.scripted_gain,
+            self.scripted_controller,
+            env,
+            self.rng,
+        )
+        scripted = np.clip(scripted, low, high).astype(np.float32)
+        action_seq[:proposal_count] = scripted
+        noise = self.rng.normal(
+            0.0, 0.1, size=(proposal_count, self.horizon, self.spec.action_dim)
+        ).astype(np.float32)
+        action_seq[:proposal_count] = np.clip(action_seq[:proposal_count] + noise, low, high)
+
+    def _teacher_action(self, obs, env) -> np.ndarray:
+        action = scripted_action(
+            obs,
+            self.spec.action_dim,
+            self.scripted_gain,
+            self.scripted_controller,
+            env,
+            self.rng,
+        )
+        return np.clip(action, env.action_space.low, env.action_space.high).astype(np.float32)
+
+    def _teacher_correction_active(self, obs) -> bool:
+        if self.teacher_correction_fraction <= 0.0 or not self.spec.is_goal_env:
+            return False
+        if np.isinf(self.teacher_correction_threshold):
+            return True
+        distance = goal_reach_distance(flatten_obs(obs), self.spec)
+        return distance <= self.teacher_correction_threshold
+
+    def _sample_cem(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        low = env.action_space.low.astype(np.float32)
+        high = env.action_space.high.astype(np.float32)
+        if self.warm_start_cem and self.prev_plan is not None:
+            mean = np.zeros((self.horizon, self.spec.action_dim), dtype=np.float32)
+            mean[:-1] = self.prev_plan[1:]
+            mean[-1] = self.prev_plan[-1]
+        else:
+            mean = np.zeros((self.horizon, self.spec.action_dim), dtype=np.float32)
+        std = np.full_like(mean, self.action_std)
+        elite_count = max(1, int(round(self.candidates * self.elite_frac)))
+        best_seq = None
+        best_score = float("inf")
+
+        for _ in range(self.cem_iters):
+            samples = self.rng.normal(mean, std, size=(self.candidates, self.horizon, self.spec.action_dim))
+            samples = np.clip(samples.astype(np.float32), low, high)
+            self._inject_scripted_proposals(obs, env, samples)
+            scores = self._score_sequences(obs, samples).detach().cpu().numpy()
+            order = np.argsort(scores)
+            if float(scores[order[0]]) < best_score:
+                best_score = float(scores[order[0]])
+                best_seq = samples[order[0]].copy()
+            elites = samples[order[:elite_count]]
+            mean = elites.mean(axis=0)
+            std = np.maximum(elites.std(axis=0), 0.05)
+
+        if best_seq is None:
+            return self._sample_uniform(obs, env)
+        return best_seq[None, :, :]
+
+    def _sample_grad(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        low = torch.as_tensor(env.action_space.low, dtype=torch.float32, device=self.device)
+        high = torch.as_tensor(env.action_space.high, dtype=torch.float32, device=self.device)
+        center = (high + low) * 0.5
+        half = torch.clamp((high - low) * 0.5, min=1e-6)
+        candidate_count = max(1, self.candidates)
+
+        if self.prev_plan is not None:
+            init = np.zeros((self.horizon, self.spec.action_dim), dtype=np.float32)
+            init[:-1] = self.prev_plan[1:]
+            init[-1] = self.prev_plan[-1]
+            init = np.repeat(init[None], candidate_count, axis=0)
+            init += self.rng.normal(0.0, 0.15, size=init.shape).astype(np.float32)
+        else:
+            init = self.rng.normal(
+                0.0,
+                self.action_std,
+                size=(candidate_count, self.horizon, self.spec.action_dim),
+            ).astype(np.float32)
+        init = np.clip(init, env.action_space.low, env.action_space.high)
+        normalized = (torch.from_numpy(init).to(self.device) - center) / half
+        u = torch.atanh(torch.clamp(normalized, -0.999, 0.999)).detach().requires_grad_(True)
+        optimizer = torch.optim.Adam([u], lr=self.grad_lr)
+
+        with torch.enable_grad():
+            for _ in range(self.grad_iters):
+                optimizer.zero_grad(set_to_none=True)
+                action_tensor = center + half * torch.tanh(u)
+                scores = self._score_action_tensor(obs, action_tensor)
+                loss = scores.mean()
+                loss.backward()
+                optimizer.step()
+
+        with torch.no_grad():
+            action_tensor = center + half * torch.tanh(u)
+            scores = self._score_action_tensor(obs, action_tensor)
+            best = int(torch.argmin(scores).detach().cpu())
+            return action_tensor[best : best + 1].detach().cpu().numpy().astype(np.float32)
+
+    @torch.no_grad()
+    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        teacher_active = self._teacher_correction_active(obs)
+        if teacher_active and self.teacher_correction_fraction >= 0.999:
+            action = self._teacher_action(obs, env)
+            self.prev_action = action
+            self.prev_plan = np.repeat(action[None, :], self.horizon, axis=0)
+            return action
+
+        if self.method == "cem":
+            action_seq = self._sample_cem(obs, env)
+        elif self.method == "grad":
+            action_seq = self._sample_grad(obs, env)
+        else:
+            action_seq = self._sample_uniform(obs, env)
+        scores = self._score_sequences(obs, action_seq)
+        best = int(torch.argmin(scores).cpu())
+        chosen_plan = action_seq[best].copy()
+        raw_action = chosen_plan[0].copy()
+        if teacher_active:
+            teacher_action = self._teacher_action(obs, env)
+            raw_action = (
+                (1.0 - self.teacher_correction_fraction) * raw_action
+                + self.teacher_correction_fraction * teacher_action
+            )
+        if self.execute_smoothing > 0.0:
+            smoothing = float(np.clip(self.execute_smoothing, 0.0, 0.95))
+            action = (1.0 - smoothing) * raw_action + smoothing * self.prev_action
+        else:
+            action = raw_action
+        action = np.asarray(action, dtype=np.float32)
+        self.prev_action = action
+        self.prev_plan = chosen_plan
+        return action
+
+
+def load_jepa_artifact(path: Path, device: torch.device):
+    artifact = torch.load(path, map_location=device, weights_only=False)
+    spec = ObsSpec(**artifact["spec"])
+    config = artifact["config"]
+    normalizer = Normalizer(
+        mean=np.asarray(artifact["normalizer"]["mean"], dtype=np.float32),
+        std=np.asarray(artifact["normalizer"]["std"], dtype=np.float32),
+    )
+    model = ActionConditionedJEPA(
+        state_dim=spec.state_dim,
+        action_dim=spec.action_dim,
+        latent_dim=int(config["latent_dim"]),
+        hidden_dim=int(config["hidden_dim"]),
+        max_horizon=int(config["max_horizon"]),
+        predictor_mode=str(config.get("predictor_mode", "direct")),
+        residual_prediction=bool(config.get("residual_prediction", False)),
+    ).to(device)
+    model.load_state_dict(artifact["model"])
+    model.eval()
+    return model, normalizer, spec, config
+
+
+def rollout_policy(
+    env,
+    policy: Policy,
+    *,
+    episodes: int,
+    seed: int,
+    video_path: Path | None = None,
+    fps: int = 30,
+) -> dict[str, float | str]:
+    successes = []
+    final_distances = []
+    episode_lengths = []
+    action_norms = []
+    action_deltas = []
+    frames = []
+
+    for episode_idx in range(episodes):
+        obs, _ = env.reset(seed=seed + episode_idx)
+        if video_path is not None and episode_idx == 0:
+            frame = env.render()
+            if frame is not None:
+                frames.append(frame)
+        terminated = truncated = False
+        final_info = {}
+        steps = 0
+        prev_action = None
+
+        while not (terminated or truncated):
+            action = policy.act(obs, env)
+            action_norms.append(float(np.linalg.norm(action)))
+            if prev_action is not None:
+                action_deltas.append(float(np.linalg.norm(action - prev_action)))
+            prev_action = np.array(action, copy=True)
+            obs, _, terminated, truncated, final_info = env.step(action)
+            steps += 1
+            if video_path is not None and episode_idx == 0:
+                frame = env.render()
+                if frame is not None:
+                    frames.append(frame)
+
+        successes.append(float(final_info.get("is_success", 0.0)))
+        if isinstance(obs, dict) and "achieved_goal" in obs and "desired_goal" in obs:
+            achieved = np.asarray(obs["achieved_goal"], dtype=np.float32)
+            desired = np.asarray(obs["desired_goal"], dtype=np.float32)
+            final_distances.append(float(np.linalg.norm(achieved - desired)))
+        else:
+            final_distances.append(float("nan"))
+        episode_lengths.append(float(steps))
+
+    metrics: dict[str, float | str] = {
+        "policy": policy.name,
+        "episodes": float(episodes),
+        "success_rate": float(np.mean(successes)) if successes else 0.0,
+        "mean_final_distance": float(np.mean(final_distances)) if final_distances else float("nan"),
+        "mean_episode_length": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
+        "mean_action_norm": float(np.mean(action_norms)) if action_norms else 0.0,
+        "mean_action_delta": float(np.mean(action_deltas)) if action_deltas else 0.0,
+    }
+    if video_path is not None and frames:
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimsave(video_path, frames, fps=fps, format="FFMPEG")
+        metrics["video_path"] = str(video_path)
+    return metrics
+
+
+def make_argparser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Cross-evaluate JEPA against classic baselines.")
+    parser.add_argument("--task", default=None, choices=["fetch_reach", "fetch_pick_place", "adroit_door"])
+    parser.add_argument("--env-id", default=None)
+    parser.add_argument("--output-root", type=Path, default=Path("runs"))
+    parser.add_argument("--model-path", type=Path, default=None)
+    parser.add_argument("--sb3-path", type=Path, default=None, help="Optional pre-trained SB3 .zip checkpoint.")
+    parser.add_argument("--hf-sb3-repo", default=None, help="Optional Hugging Face repo id for an SB3 checkpoint.")
+    parser.add_argument("--hf-sb3-filename", default="best_model.zip")
+    parser.add_argument("--episodes", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--max-episode-steps", type=int, default=None)
+    parser.add_argument("--mpc-candidates", type=int, default=128)
+    parser.add_argument("--mpc-horizon", type=int, default=8)
+    parser.add_argument("--mpc-method", choices=["random", "cem", "grad"], default="random")
+    parser.add_argument("--mpc-score", choices=["latent", "state", "combined"], default="latent")
+    parser.add_argument("--cem-iters", type=int, default=3)
+    parser.add_argument("--elite-frac", type=float, default=0.1)
+    parser.add_argument("--action-std", type=float, default=0.7)
+    parser.add_argument("--action-l2-weight", type=float, default=0.0)
+    parser.add_argument("--action-delta-weight", type=float, default=0.0)
+    parser.add_argument("--execute-smoothing", type=float, default=0.0)
+    parser.add_argument("--no-warm-start-cem", action="store_true")
+    parser.add_argument("--grad-iters", type=int, default=30)
+    parser.add_argument("--grad-lr", type=float, default=0.08)
+    parser.add_argument("--scripted-gain", type=float, default=5.0)
+    parser.add_argument("--jepa-scripted-proposal-fraction", type=float, default=0.0)
+    parser.add_argument(
+        "--teacher-correction-fraction",
+        type=float,
+        default=0.0,
+        help="Blend fraction for scripted teacher correction when within the threshold.",
+    )
+    parser.add_argument(
+        "--teacher-correction-threshold",
+        type=float,
+        default=0.0,
+        help="Goal distance threshold for teacher correction. Use inf to match the scripted controller.",
+    )
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--video-dir", type=Path, default=None)
+    parser.add_argument(
+        "--video-policy",
+        default="jepa_mpc",
+        help="Policy name to record, `jepa_mpc` prefix, `all`, or `none`.",
+    )
+    parser.add_argument("--fps", type=int, default=30)
+    return parser
+
+
+def main() -> None:
+    args = make_argparser().parse_args()
+    task = resolve_task(args.task, args.env_id)
+    args.task = task.name
+    args.env_id = task.env_id
+    if args.max_episode_steps is None:
+        args.max_episode_steps = task.max_episode_steps
+    out_dir = task_dir(args.output_root, task)
+    if args.out is None:
+        args.out = out_dir / "eval_results" / f"{task.slug}_cross_eval.jsonl"
+    if args.video_dir is None:
+        args.video_dir = out_dir / "videos"
+    if args.model_path is None:
+        args.model_path = out_dir / "checkpoints" / f"{task.slug}_jepa_model.pt"
+    os.environ.setdefault("MUJOCO_GL", "egl")
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
+
+    model, normalizer, spec, config = load_jepa_artifact(args.model_path, device)
+    env = make_env(args.env_id, seed=args.seed, max_episode_steps=args.max_episode_steps)
+    env_spec = obs_spec_from_env(env)
+    if env_spec != spec:
+        raise ValueError(f"Model spec {spec} does not match env spec {env_spec}.")
+
+    sb3_path = args.sb3_path
+    if args.hf_sb3_repo is not None:
+        from huggingface_hub import hf_hub_download
+
+        sb3_path = Path(hf_hub_download(repo_id=args.hf_sb3_repo, filename=args.hf_sb3_filename))
+
+    policies: list[Policy] = [RandomPolicy()]
+    if spec.is_goal_env:
+        policies.append(
+            ScriptedGoalPolicy(
+                action_dim=spec.action_dim,
+                controller=task.controller,
+                gain=args.scripted_gain,
+            )
+        )
+    policies.append(
+        JEPAMPCPolicy(
+            model=model,
+            normalizer=normalizer,
+            spec=spec,
+            device=device,
+            candidates=args.mpc_candidates,
+            horizon=args.mpc_horizon,
+            seed=args.seed + 10_000,
+            method=args.mpc_method,
+            score_mode=args.mpc_score,
+            cem_iters=args.cem_iters,
+            elite_frac=args.elite_frac,
+            action_std=args.action_std,
+            action_l2_weight=args.action_l2_weight,
+            action_delta_weight=args.action_delta_weight,
+            execute_smoothing=args.execute_smoothing,
+            warm_start_cem=not args.no_warm_start_cem,
+            grad_iters=args.grad_iters,
+            grad_lr=args.grad_lr,
+            scripted_proposal_fraction=args.jepa_scripted_proposal_fraction,
+            teacher_correction_fraction=args.teacher_correction_fraction,
+            teacher_correction_threshold=args.teacher_correction_threshold,
+            scripted_gain=args.scripted_gain,
+            scripted_controller=task.controller,
+        )
+    )
+    sb3_error = None
+    if sb3_path is not None:
+        try:
+            policies.append(SB3Policy(sb3_path))
+        except Exception as exc:
+            sb3_error = str(exc)
+            print(
+                json.dumps(
+                    {
+                        "event": "sb3_load_failed",
+                        "path": str(sb3_path),
+                        "error": sb3_error,
+                    }
+                )
+            )
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for policy in policies:
+        env.close()
+        wants_video = (
+            args.video_policy == "all"
+            or args.video_policy == policy.name
+            or (args.video_policy == "jepa_mpc" and policy.name.startswith("jepa_mpc"))
+        )
+        render_mode = "rgb_array" if wants_video else None
+        eval_env = make_env(
+            args.env_id,
+            seed=args.seed,
+            max_episode_steps=args.max_episode_steps,
+            render_mode=render_mode,
+        )
+        video_path = args.video_dir / f"{policy.name}_{task.slug}.mp4" if wants_video else None
+        metrics = rollout_policy(
+            eval_env,
+            policy,
+            episodes=args.episodes,
+            seed=args.seed,
+            video_path=video_path,
+            fps=args.fps,
+        )
+        eval_env.close()
+        row = {
+            "event": "cross_eval",
+            "env_id": args.env_id,
+            "device": str(device),
+            "model_path": str(args.model_path),
+            "model_config": config,
+            **metrics,
+        }
+        rows.append(row)
+        print(json.dumps(row, default=str))
+
+    with args.out.open("w", encoding="utf-8") as f:
+        if sb3_error is not None:
+            f.write(
+                json.dumps(
+                    {
+                        "event": "sb3_load_failed",
+                        "path": str(sb3_path),
+                        "error": sb3_error,
+                    }
+                )
+                + "\n"
+            )
+        for row in rows:
+            f.write(json.dumps(row, default=str) + "\n")
+    print(json.dumps({"event": "saved_eval", "path": str(args.out)}))
+
+
+if __name__ == "__main__":
+    main()
