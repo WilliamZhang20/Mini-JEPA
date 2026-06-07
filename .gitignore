@@ -12,7 +12,6 @@ dist/
 
 # Experiment artifacts
 checkpoints/
-runs/
 logs/
 eval_results/
 videos/

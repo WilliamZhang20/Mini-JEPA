@@ -263,6 +263,12 @@ def make_argparser() -> argparse.ArgumentParser:
         default=None,
         help="Final model-only artifact written after training finishes.",
     )
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=0,
+        help="Write checkpoint/model artifacts every N training steps. Disabled when 0.",
+    )
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--smoke", action="store_true", help="Use tiny settings for compile/runtime checks.")
     return parser
@@ -363,7 +369,12 @@ def main() -> None:
             optimizer.step()
             model.update_target(args.ema)
             if step == 1 or step % args.log_every == 0 or step >= args.train_steps:
-                print(json.dumps({"event": "train", "step": step, **metrics}))
+                print(json.dumps({"event": "train", "step": step, **metrics}), flush=True)
+            if args.save_every > 0 and step % args.save_every == 0:
+                save_checkpoint(args.save_path, model, optimizer, normalizer, spec, args, step)
+                save_model_artifact(args.model_path, model, normalizer, spec, args)
+                print(json.dumps({"event": "saved", "path": str(args.save_path), "step": step}), flush=True)
+                print(json.dumps({"event": "saved_model", "path": str(args.model_path), "step": step}), flush=True)
             if step >= args.train_steps:
                 break
 
