@@ -96,10 +96,19 @@ def goal_state_from_state(state: np.ndarray, spec: ObsSpec) -> np.ndarray:
     if not spec.is_goal_env or spec.goal_dim == 0:
         return np.array(state, copy=True).astype(np.float32)
     goal_state = np.array(state, copy=True)
+    achieved = np.array(goal_state[spec.obs_dim : spec.obs_dim + spec.goal_dim], copy=True)
     desired = goal_state[
         spec.obs_dim + spec.goal_dim : spec.obs_dim + 2 * spec.goal_dim
     ]
     goal_state[spec.obs_dim : spec.obs_dim + spec.goal_dim] = desired
     if spec.obs_dim >= spec.goal_dim:
-        goal_state[: spec.goal_dim] = desired
+        obs = goal_state[: spec.obs_dim]
+        best_start = 0
+        best_error = float("inf")
+        for start in range(spec.obs_dim - spec.goal_dim + 1):
+            error = float(np.linalg.norm(obs[start : start + spec.goal_dim] - achieved))
+            if error < best_error:
+                best_error = error
+                best_start = start
+        goal_state[best_start : best_start + spec.goal_dim] = desired
     return goal_state.astype(np.float32)

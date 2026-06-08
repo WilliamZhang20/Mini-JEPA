@@ -31,6 +31,14 @@ TASKS = {
         max_episode_steps=100,
         horizons="1,2,4,8,16",
     ),
+    "fetch_push": TaskConfig(
+        name="fetch_push",
+        env_id="FetchPush-v4",
+        slug="fetch_push",
+        controller="push",
+        max_episode_steps=100,
+        horizons="1,2,4,8,16",
+    ),
     "adroit_door": TaskConfig(
         name="adroit_door",
         env_id="AdroitHandDoor-v1",
@@ -46,6 +54,8 @@ def task_from_env(env_id: str) -> TaskConfig:
     env_lower = env_id.lower()
     if "pickandplace" in env_lower:
         return TASKS["fetch_pick_place"]
+    if "fetchpush" in env_lower:
+        return TASKS["fetch_push"]
     if "fetchreach" in env_lower:
         return TASKS["fetch_reach"]
     if "adroit" in env_lower and "door" in env_lower:

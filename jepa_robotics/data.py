@@ -43,28 +43,94 @@ def scripted_reach_action(obs: dict[str, np.ndarray], action_dim: int, gain: flo
     return action
 
 
+def unit_vector(vec: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    norm = float(np.linalg.norm(vec))
+    if norm < eps:
+        return np.zeros_like(vec, dtype=np.float32)
+    return (vec / norm).astype(np.float32)
+
+
 def scripted_pick_place_action(obs: dict[str, np.ndarray], action_dim: int, gain: float) -> np.ndarray:
+    """Phase-based grasp-and-place controller.
+
+    Phases are detected purely from geometry: align above the object (fingers
+    open), descend, close the fingers, then carry the grasped object to the
+    desired goal. The previous version mis-detected the grasp (the fingers
+    settle near 0.048 when closed *around* an object, never below the old 0.046
+    threshold), so it never lifted; this version keys off ``fingers_open`` and
+    3D proximity instead and reliably solves FetchPickAndPlace.
+    """
+    observation = np.asarray(obs["observation"], dtype=np.float32).reshape(-1)
+    gripper = observation[:3]
+    obj = np.asarray(obs["achieved_goal"], dtype=np.float32).reshape(-1)
+    goal = np.asarray(obs["desired_goal"], dtype=np.float32).reshape(-1)
+    finger = float(observation[9] + observation[10])  # ~0.10 open, ~0.048 closed on object
+    action = np.zeros(action_dim, dtype=np.float32)
+
+    xy = float(np.linalg.norm(gripper[:2] - obj[:2]))
+    d3 = float(np.linalg.norm(gripper - obj))
+    fingers_open = finger > 0.07
+    at_object = d3 < 0.055
+    grasped = at_object and not fingers_open
+
+    if not at_object and xy > 0.03:
+        target = obj + np.array([0.0, 0.0, 0.06], dtype=np.float32)
+        grip = 1.0
+    elif not at_object:
+        target = obj.copy()
+        grip = 1.0
+    elif not grasped:
+        target = obj.copy()
+        grip = -1.0
+    else:
+        target = goal.copy()
+        grip = -1.0
+
+    action[: min(3, action_dim)] = gain * (target[: min(3, action_dim)] - gripper[: min(3, action_dim)])
+    if action_dim >= 4:
+        action[3] = grip
+    return action
+
+
+def scripted_push_action(obs: dict[str, np.ndarray], action_dim: int, gain: float) -> np.ndarray:
+    """Approach-from-above push controller.
+
+    The old controller drove straight to a stand-off point behind the object,
+    which meant it plowed *through* the object (often from the goal side) and
+    knocked it the wrong way. This version lifts clear of the object, moves over
+    the stand-off point on the far side from the goal, descends, then pushes
+    toward the goal, easing off and retracting once the object is close so it
+    does not overshoot.
+    """
     observation = np.asarray(obs["observation"], dtype=np.float32).reshape(-1)
     gripper = observation[:3]
     obj = np.asarray(obs["achieved_goal"], dtype=np.float32).reshape(-1)
     goal = np.asarray(obs["desired_goal"], dtype=np.float32).reshape(-1)
     action = np.zeros(action_dim, dtype=np.float32)
 
-    object_to_goal = np.linalg.norm(obj - goal)
-    gripper_to_object = np.linalg.norm(gripper - obj)
-    if gripper_to_object > 0.04:
-        target = obj + np.array([0.0, 0.0, 0.035], dtype=np.float32)
-        grip = 1.0
-    elif object_to_goal > 0.05:
-        target = goal + np.array([0.0, 0.0, 0.06], dtype=np.float32)
-        grip = -1.0
+    to_goal = goal[:2] - obj[:2]
+    dist = float(np.linalg.norm(to_goal))
+    d = unit_vector(to_goal) if dist > 1e-6 else np.zeros(2, dtype=np.float32)
+    behind = obj[:2] - 0.075 * d
+    behind_xy_err = float(np.linalg.norm(gripper[:2] - behind))
+    obj_z = float(obj[2])
+
+    if dist < 0.03:
+        target = np.array([gripper[0], gripper[1], obj_z + 0.12], dtype=np.float32)
+    elif behind_xy_err > 0.03 and gripper[2] < obj_z + 0.07:
+        target = np.array([gripper[0], gripper[1], obj_z + 0.1], dtype=np.float32)
+    elif behind_xy_err > 0.03:
+        target = np.array([behind[0], behind[1], obj_z + 0.1], dtype=np.float32)
+    elif gripper[2] > obj_z + 0.02:
+        target = np.array([behind[0], behind[1], obj_z], dtype=np.float32)
     else:
-        target = goal
-        grip = -0.3
+        step = min(0.08, 0.6 * dist)
+        target_xy = obj[:2] + step * d
+        target = np.array([target_xy[0], target_xy[1], obj_z], dtype=np.float32)
 
     action[: min(3, action_dim)] = gain * (target[: min(3, action_dim)] - gripper[: min(3, action_dim)])
     if action_dim >= 4:
-        action[3] = grip
+        action[3] = -1.0  # keep the gripper closed for pushing
     return action
 
 
@@ -80,6 +146,8 @@ def scripted_action(
         return env.action_space.sample().astype(np.float32)
     if controller == "pick_place":
         action = scripted_pick_place_action(obs, action_dim, gain)
+    elif controller == "push":
+        action = scripted_push_action(obs, action_dim, gain)
     else:
         action = scripted_reach_action(obs, action_dim, gain)
     return action.astype(np.float32)

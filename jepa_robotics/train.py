@@ -24,11 +24,17 @@ def parse_horizons(value: str) -> list[int]:
 
 def build_goal_states(raw_state: torch.Tensor, normalizer, spec: ObsSpec) -> torch.Tensor:
     raw_goal = raw_state.clone()
+    achieved = raw_goal[:, spec.obs_dim : spec.obs_dim + spec.goal_dim].clone()
     desired_start = spec.obs_dim + spec.goal_dim
     desired = raw_goal[:, desired_start : desired_start + spec.goal_dim]
     raw_goal[:, spec.obs_dim : spec.obs_dim + spec.goal_dim] = desired
     if spec.obs_dim >= spec.goal_dim:
-        raw_goal[:, : spec.goal_dim] = desired
+        errors = []
+        for start in range(spec.obs_dim - spec.goal_dim + 1):
+            obs_slice = raw_goal[:, start : start + spec.goal_dim]
+            errors.append(torch.linalg.norm(obs_slice - achieved, dim=-1).mean())
+        best_start = int(torch.argmin(torch.stack(errors)).detach().cpu())
+        raw_goal[:, best_start : best_start + spec.goal_dim] = desired
     return normalizer.encode_tensor(raw_goal)
 
 
@@ -225,7 +231,11 @@ def save_model_artifact(path: Path, model, normalizer, spec, args) -> None:
 
 def make_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a small action-conditioned JEPA on Gymnasium Robotics.")
-    parser.add_argument("--task", default=None, choices=["fetch_reach", "fetch_pick_place", "adroit_door"])
+    parser.add_argument(
+        "--task",
+        default=None,
+        choices=["fetch_reach", "fetch_pick_place", "fetch_push", "adroit_door"],
+    )
     parser.add_argument("--env-id", default=None)
     parser.add_argument("--output-root", type=Path, default=Path("runs"))
     parser.add_argument("--seed", type=int, default=7)
@@ -236,7 +246,7 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--horizons", type=parse_horizons, default=None)
     parser.add_argument("--latent-dim", type=int, default=64)
     parser.add_argument("--hidden-dim", type=int, default=256)
-    parser.add_argument("--predictor-mode", choices=["direct", "rollout"], default="direct")
+    parser.add_argument("--predictor-mode", choices=["direct", "rollout", "recurrent"], default="direct")
     parser.add_argument("--residual-prediction", action="store_true")
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--ema", type=float, default=0.995)

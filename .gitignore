@@ -14,12 +14,10 @@ dist/
 checkpoints/
 logs/
 eval_results/
-videos/
 *.pt
 *.pth
 *.ckpt
 *.zip
-*.mp4
 *.jsonl
 
 # Local scratch/output

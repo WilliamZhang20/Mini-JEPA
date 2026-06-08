@@ -62,7 +62,7 @@ class RandomPolicy:
 class ScriptedGoalPolicy:
     action_dim: int
     controller: str
-    gain: float = 5.0
+    gain: float = 12.0
     name: str = "scripted"
 
     def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
@@ -115,6 +115,10 @@ class JEPAMPCPolicy:
         cem_iters: int = 3,
         elite_frac: float = 0.1,
         action_std: float = 0.7,
+        manip_reach_weight: float = 0.4,
+        manip_path_weight: float = 0.3,
+        manip_align_weight: float = 0.0,
+        manip_grasp_weight: float = 0.0,
         action_l2_weight: float = 0.0,
         action_delta_weight: float = 0.0,
         execute_smoothing: float = 0.0,
@@ -124,8 +128,10 @@ class JEPAMPCPolicy:
         scripted_proposal_fraction: float = 0.0,
         teacher_correction_fraction: float = 0.0,
         teacher_correction_threshold: float = 0.0,
-        scripted_gain: float = 5.0,
+        scripted_gain: float = 12.0,
         scripted_controller: str = "reach",
+        policy_net=None,
+        policy_proposal_fraction: float = 0.0,
     ) -> None:
         self.name = f"jepa_mpc_{method}_{score_mode}"
         if action_l2_weight > 0.0 or action_delta_weight > 0.0 or execute_smoothing > 0.0:
@@ -151,6 +157,10 @@ class JEPAMPCPolicy:
         self.cem_iters = cem_iters
         self.elite_frac = elite_frac
         self.action_std = action_std
+        self.manip_reach_weight = manip_reach_weight
+        self.manip_path_weight = manip_path_weight
+        self.manip_align_weight = manip_align_weight
+        self.manip_grasp_weight = manip_grasp_weight
         self.action_l2_weight = action_l2_weight
         self.action_delta_weight = action_delta_weight
         self.execute_smoothing = execute_smoothing
@@ -162,9 +172,98 @@ class JEPAMPCPolicy:
         self.teacher_correction_threshold = float(teacher_correction_threshold)
         self.scripted_gain = scripted_gain
         self.scripted_controller = scripted_controller
+        self.policy_net = policy_net
+        self.policy_proposal_fraction = float(np.clip(policy_proposal_fraction, 0.0, 1.0))
+        if policy_net is not None and policy_proposal_fraction > 0.0:
+            self.name = f"{self.name}_policy{int(round(policy_proposal_fraction * 100))}"
         self.rng = np.random.default_rng(seed)
         self.prev_action = np.zeros(spec.action_dim, dtype=np.float32)
         self.prev_plan: np.ndarray | None = None
+
+    def _manip_scores(
+        self,
+        raw_state: np.ndarray,
+        z: torch.Tensor,
+        action_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        """Staged grasp-aware manipulation cost over the whole predicted trajectory.
+
+        Rolls the latent dynamics out for the full horizon, decodes every
+        intermediate state, and combines several dense sub-costs that together
+        encode the reach -> align -> grasp -> lift -> transport phases of a pick.
+
+        Why this is needed: the object-to-goal distance is *flat* until the
+        object is actually grasped (the block does not move on its own), so a
+        planner that scores only that distance gets no gradient and never
+        discovers the grasp. Each sub-cost below is dense in a different phase:
+
+        * ``align``  - gripper x/y over the object (so a descent can grasp it),
+        * ``reach``  - full 3D gripper->object distance,
+        * ``grasp``  - *close the fingers when the gripper is on the object*;
+          this is the catalyst term. Without it the gripper command oscillates
+          and the block is never picked up.
+        * ``path``/``terminal`` - object-to-goal distance (the real objective),
+          which becomes informative only once the grasp makes the object movable.
+        """
+        traj_z = self.model.predict_rollout(z, action_tensor, self.horizon)
+        pred_state = self.normalizer.decode_tensor(self.model.state_probe(traj_z))
+
+        grip = pred_state[..., :3]
+        obj_start = self.spec.obs_dim
+        obj = pred_state[..., obj_start : obj_start + self.spec.goal_dim]
+        desired_start = self.spec.obs_dim + self.spec.goal_dim
+        desired = torch.as_tensor(
+            raw_state[desired_start : desired_start + self.spec.goal_dim],
+            dtype=pred_state.dtype,
+            device=pred_state.device,
+        ).view(1, 1, -1)
+
+        gd = min(3, self.spec.goal_dim)
+        obj_to_goal = torch.linalg.norm(obj - desired, dim=-1)                 # [B, H]
+        grip_to_obj = torch.linalg.norm(grip[..., :gd] - obj[..., :gd], dim=-1)  # [B, H]
+        align_xy = torch.linalg.norm(grip[..., :2] - obj[..., :2], dim=-1)       # [B, H]
+
+        terminal = obj_to_goal[:, -1]
+        path = obj_to_goal.mean(dim=1)
+        reach = grip_to_obj.mean(dim=1)
+        align = align_xy.mean(dim=1)
+        scores = (
+            terminal
+            + self.manip_path_weight * path
+            + self.manip_reach_weight * reach
+            + self.manip_align_weight * align
+        )
+
+        # Grasp catalyst: when the gripper is on the object, reward closing the
+        # fingers. Gripper command > 0 opens, < 0 closes, so we penalise an open
+        # command weighted by how close the gripper is to the object.
+        if self.manip_grasp_weight > 0.0 and action_tensor.shape[-1] >= 4:
+            nearness = torch.exp(-grip_to_obj / 0.04)                          # [B, H], ~1 on the object
+            open_cmd = torch.clamp(action_tensor[..., 3], min=-1.0)            # [B, H]
+            grasp = (nearness * (open_cmd + 1.0)).mean(dim=1)                  # 0 when closed on object
+            scores = scores + self.manip_grasp_weight * grasp
+
+        scores = scores + self._action_regularizers(action_tensor)
+        return scores
+
+    def _action_regularizers(self, action_tensor: torch.Tensor) -> torch.Tensor:
+        reg = torch.zeros(action_tensor.shape[0], dtype=action_tensor.dtype, device=action_tensor.device)
+        if self.action_l2_weight > 0.0:
+            reg = reg + self.action_l2_weight * torch.mean(action_tensor.square(), dim=(1, 2))
+        if self.action_delta_weight > 0.0:
+            prev = torch.as_tensor(
+                self.prev_action,
+                dtype=action_tensor.dtype,
+                device=action_tensor.device,
+            ).view(1, 1, -1)
+            first_delta = action_tensor[:, :1] - prev
+            seq_delta = action_tensor[:, 1:] - action_tensor[:, :-1]
+            if seq_delta.numel() == 0:
+                delta_cost = torch.mean(first_delta.square(), dim=(1, 2))
+            else:
+                delta_cost = torch.cat([first_delta, seq_delta], dim=1).square().mean(dim=(1, 2))
+            reg = reg + self.action_delta_weight * delta_cost
+        return reg
 
     def _score_action_tensor(
         self,
@@ -174,6 +273,10 @@ class JEPAMPCPolicy:
         raw_state = flatten_obs(obs)
         state = torch.from_numpy(self.normalizer.encode(raw_state)).unsqueeze(0).to(self.device)
         z = self.model.encode(state).repeat(action_tensor.shape[0], 1)
+
+        if self.score_mode == "manip":
+            return self._manip_scores(raw_state, z, action_tensor)
+
         pred_z = self.model.predict(z, action_tensor, self.horizon)
 
         scores = torch.zeros(action_tensor.shape[0], dtype=pred_z.dtype, device=self.device)
@@ -228,6 +331,7 @@ class JEPAMPCPolicy:
         action_seq = self.rng.uniform(
             low, high, size=(self.candidates, self.horizon, self.spec.action_dim)
         ).astype(np.float32)
+        self._inject_policy_proposals(obs, env, action_seq)
         self._inject_scripted_proposals(obs, env, action_seq)
         return action_seq
 
@@ -252,6 +356,48 @@ class JEPAMPCPolicy:
         ).astype(np.float32)
         action_seq[:proposal_count] = np.clip(action_seq[:proposal_count] + noise, low, high)
 
+    @torch.no_grad()
+    def _policy_rollout(self, obs: dict[str, np.ndarray], env) -> np.ndarray | None:
+        """Open-loop action sequence from the learned policy + world model.
+
+        Encodes the current observation, then alternates ``a = policy(z)`` and a
+        one-step latent prediction to imagine a full-horizon plan. This is the
+        proposal the sampling planner refines; rolling the policy *through the
+        world model* keeps the proposal self-consistent with the dynamics.
+        """
+        if self.policy_net is None:
+            return None
+        raw_state = flatten_obs(obs)
+        z = self.model.encode(
+            torch.from_numpy(self.normalizer.encode(raw_state)).unsqueeze(0).to(self.device)
+        )
+        low = env.action_space.low.astype(np.float32)
+        high = env.action_space.high.astype(np.float32)
+        actions = []
+        for _ in range(self.horizon):
+            a = self.policy_net(z)
+            actions.append(a)
+            z = self.model.predict_rollout(z, a.unsqueeze(1), 1)[:, -1]
+        seq = torch.cat(actions, dim=0).cpu().numpy().astype(np.float32)
+        return np.clip(seq, low, high)
+
+    def _inject_policy_proposals(self, obs, env, action_seq: np.ndarray) -> None:
+        if self.policy_net is None or self.policy_proposal_fraction <= 0.0:
+            return
+        count = int(round(action_seq.shape[0] * self.policy_proposal_fraction))
+        if count <= 0:
+            return
+        seq = self._policy_rollout(obs, env)
+        if seq is None:
+            return
+        low = env.action_space.low.astype(np.float32)
+        high = env.action_space.high.astype(np.float32)
+        action_seq[:count] = seq
+        # keep one clean copy of the proposal, jitter the rest for local search
+        if count > 1:
+            noise = self.rng.normal(0.0, 0.1, size=(count - 1,) + seq.shape).astype(np.float32)
+            action_seq[1:count] = np.clip(action_seq[1:count] + noise, low, high)
+
     def _teacher_action(self, obs, env) -> np.ndarray:
         action = scripted_action(
             obs,
@@ -274,7 +420,11 @@ class JEPAMPCPolicy:
     def _sample_cem(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
         low = env.action_space.low.astype(np.float32)
         high = env.action_space.high.astype(np.float32)
-        if self.warm_start_cem and self.prev_plan is not None:
+        policy_seq = self._policy_rollout(obs, env)
+        if policy_seq is not None:
+            # warm-start the search distribution at the learned proposal
+            mean = policy_seq.copy()
+        elif self.warm_start_cem and self.prev_plan is not None:
             mean = np.zeros((self.horizon, self.spec.action_dim), dtype=np.float32)
             mean[:-1] = self.prev_plan[1:]
             mean[-1] = self.prev_plan[-1]
@@ -288,6 +438,7 @@ class JEPAMPCPolicy:
         for _ in range(self.cem_iters):
             samples = self.rng.normal(mean, std, size=(self.candidates, self.horizon, self.spec.action_dim))
             samples = np.clip(samples.astype(np.float32), low, high)
+            self._inject_policy_proposals(obs, env, samples)
             self._inject_scripted_proposals(obs, env, samples)
             scores = self._score_sequences(obs, samples).detach().cpu().numpy()
             order = np.argsort(scores)
@@ -375,6 +526,48 @@ class JEPAMPCPolicy:
         self.prev_action = action
         self.prev_plan = chosen_plan
         return action
+
+
+class LearnedPolicyOnly:
+    """The learned action prior executed directly, with no MPC refinement.
+
+    Serves as the baseline that isolates how much the world-model planner adds
+    on top of the behaviour-cloned policy.
+    """
+
+    def __init__(self, *, model, policy_net, normalizer, spec, device, name="jepa_policy") -> None:
+        self.model = model
+        self.policy_net = policy_net
+        self.normalizer = normalizer
+        self.spec = spec
+        self.device = device
+        self.name = name
+
+    @torch.no_grad()
+    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        raw_state = flatten_obs(obs)
+        z = self.model.encode(
+            torch.from_numpy(self.normalizer.encode(raw_state)).unsqueeze(0).to(self.device)
+        )
+        action = self.policy_net(z)[0].cpu().numpy().astype(np.float32)
+        return np.clip(action, env.action_space.low, env.action_space.high)
+
+
+def load_policy_artifact(path: Path, device: torch.device):
+    from .models import GoalConditionedPolicy
+
+    artifact = torch.load(path, map_location=device, weights_only=False)
+    cfg = artifact["config"]
+    policy = GoalConditionedPolicy(
+        latent_dim=int(cfg["latent_dim"]),
+        action_dim=int(cfg["action_dim"]),
+        hidden_dim=int(cfg["hidden_dim"]),
+    ).to(device)
+    policy.load_state_dict(artifact["policy"])
+    policy.eval()
+    for p in policy.parameters():
+        p.requires_grad_(False)
+    return policy, cfg
 
 
 def load_jepa_artifact(path: Path, device: torch.device):
@@ -466,7 +659,11 @@ def rollout_policy(
 
 def make_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Cross-evaluate JEPA against classic baselines.")
-    parser.add_argument("--task", default=None, choices=["fetch_reach", "fetch_pick_place", "adroit_door"])
+    parser.add_argument(
+        "--task",
+        default=None,
+        choices=["fetch_reach", "fetch_pick_place", "fetch_push", "adroit_door"],
+    )
     parser.add_argument("--env-id", default=None)
     parser.add_argument("--output-root", type=Path, default=Path("runs"))
     parser.add_argument("--model-path", type=Path, default=None)
@@ -479,17 +676,25 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--mpc-candidates", type=int, default=128)
     parser.add_argument("--mpc-horizon", type=int, default=8)
     parser.add_argument("--mpc-method", choices=["random", "cem", "grad"], default="random")
-    parser.add_argument("--mpc-score", choices=["latent", "state", "combined"], default="latent")
+    parser.add_argument("--mpc-score", choices=["latent", "state", "combined", "manip"], default="latent")
     parser.add_argument("--cem-iters", type=int, default=3)
     parser.add_argument("--elite-frac", type=float, default=0.1)
     parser.add_argument("--action-std", type=float, default=0.7)
+    parser.add_argument("--manip-reach-weight", type=float, default=0.4)
+    parser.add_argument("--manip-path-weight", type=float, default=0.3)
+    parser.add_argument("--manip-align-weight", type=float, default=0.0)
+    parser.add_argument("--manip-grasp-weight", type=float, default=0.0)
+    parser.add_argument("--policy-path", type=Path, default=None,
+                        help="Learned action-prior artifact; used as the MPC proposal and as a stand-alone baseline.")
+    parser.add_argument("--policy-proposal-fraction", type=float, default=0.5,
+                        help="Fraction of planner candidates seeded from the learned policy rollout.")
     parser.add_argument("--action-l2-weight", type=float, default=0.0)
     parser.add_argument("--action-delta-weight", type=float, default=0.0)
     parser.add_argument("--execute-smoothing", type=float, default=0.0)
     parser.add_argument("--no-warm-start-cem", action="store_true")
     parser.add_argument("--grad-iters", type=int, default=30)
     parser.add_argument("--grad-lr", type=float, default=0.08)
-    parser.add_argument("--scripted-gain", type=float, default=5.0)
+    parser.add_argument("--scripted-gain", type=float, default=12.0)
     parser.add_argument("--jepa-scripted-proposal-fraction", type=float, default=0.0)
     parser.add_argument(
         "--teacher-correction-fraction",
@@ -547,6 +752,10 @@ def main() -> None:
 
         sb3_path = Path(hf_hub_download(repo_id=args.hf_sb3_repo, filename=args.hf_sb3_filename))
 
+    policy_net = None
+    if args.policy_path is not None:
+        policy_net, _ = load_policy_artifact(args.policy_path, device)
+
     policies: list[Policy] = [RandomPolicy()]
     if spec.is_goal_env:
         policies.append(
@@ -554,6 +763,12 @@ def main() -> None:
                 action_dim=spec.action_dim,
                 controller=task.controller,
                 gain=args.scripted_gain,
+            )
+        )
+    if policy_net is not None:
+        policies.append(
+            LearnedPolicyOnly(
+                model=model, policy_net=policy_net, normalizer=normalizer, spec=spec, device=device
             )
         )
     policies.append(
@@ -570,6 +785,10 @@ def main() -> None:
             cem_iters=args.cem_iters,
             elite_frac=args.elite_frac,
             action_std=args.action_std,
+            manip_reach_weight=args.manip_reach_weight,
+            manip_path_weight=args.manip_path_weight,
+            manip_align_weight=args.manip_align_weight,
+            manip_grasp_weight=args.manip_grasp_weight,
             action_l2_weight=args.action_l2_weight,
             action_delta_weight=args.action_delta_weight,
             execute_smoothing=args.execute_smoothing,
@@ -581,6 +800,8 @@ def main() -> None:
             teacher_correction_threshold=args.teacher_correction_threshold,
             scripted_gain=args.scripted_gain,
             scripted_controller=task.controller,
+            policy_net=policy_net,
+            policy_proposal_fraction=args.policy_proposal_fraction,
         )
     )
     sb3_error = None
