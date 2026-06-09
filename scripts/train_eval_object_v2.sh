@@ -19,12 +19,17 @@ case "$TASK_NAME" in
     SCRIPTED_FRACTION="${SCRIPTED_FRACTION:-0.8}"
     ACTION_NOISE="${ACTION_NOISE:-0.2}"
     MANIP_REACH_WEIGHT="${MANIP_REACH_WEIGHT:-0.1}"
+    ACTION_STD="${ACTION_STD:-0.5}"
     ;;
   fetch_push)
     TASK_SLUG="fetch_push"
     SCRIPTED_FRACTION="${SCRIPTED_FRACTION:-0.75}"
     ACTION_NOISE="${ACTION_NOISE:-0.25}"
-    MANIP_REACH_WEIGHT="${MANIP_REACH_WEIGHT:-0.15}"
+    # Push must NOT use the gripper->object reach term: a good push contacts the
+    # *far* side of the object, so pulling the gripper to the object centre
+    # misleads the planner. The learned policy already knows the push approach.
+    MANIP_REACH_WEIGHT="${MANIP_REACH_WEIGHT:-0.0}"
+    ACTION_STD="${ACTION_STD:-0.3}"
     ;;
   *)
     echo "Unsupported TASK_NAME=$TASK_NAME" >&2; exit 2;;
@@ -105,7 +110,7 @@ python -m jepa_robotics.evaluate \
   --mpc-horizon 12 \
   --cem-iters 4 \
   --elite-frac 0.1 \
-  --action-std 0.5 \
+  --action-std "$ACTION_STD" \
   --manip-reach-weight "$MANIP_REACH_WEIGHT" \
   --manip-path-weight 0.3 \
   --device cuda \

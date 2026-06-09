@@ -48,6 +48,8 @@ def main() -> None:
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--vary-goal", action="store_true")
+    p.add_argument("--policy-only", action="store_true",
+                   help="Execute the learned policy directly with no MPC refinement.")
     p.add_argument("--mpc-candidates", type=int, default=128)
     p.add_argument("--mpc-horizon", type=int, default=12)
     p.add_argument("--cem-iters", type=int, default=4)
@@ -60,24 +62,31 @@ def main() -> None:
 
     task = resolve_task(args.task, None)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    from jepa_robotics.evaluate import LearnedPolicyOnly
+
     model, normalizer, spec, _ = load_jepa_artifact(args.model_path, device)
     policy_net, _ = load_policy_artifact(args.policy_path, device)
 
-    suffix = "_varied" if args.vary_goal else ""
+    suffix = ("_policyonly" if args.policy_only else "") + ("_varied" if args.vary_goal else "")
     out = args.out or Path(f"runs/{task.slug}/videos/jepa_agent_{task.slug}{suffix}.mp4")
     out.parent.mkdir(parents=True, exist_ok=True)
     table_only = task.controller != "pick_place"
 
     env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps, render_mode="rgb_array")
     unwrapped = env.unwrapped
-    controller = JEPAMPCPolicy(
-        model=model, normalizer=normalizer, spec=spec, device=device,
-        candidates=args.mpc_candidates, horizon=args.mpc_horizon, seed=args.seed + 10_000,
-        method="cem", score_mode="manip", cem_iters=args.cem_iters, action_std=args.action_std,
-        manip_reach_weight=args.manip_reach_weight, manip_path_weight=args.manip_path_weight,
-        scripted_controller=task.controller,
-        policy_net=policy_net, policy_proposal_fraction=args.policy_proposal_fraction,
-    )
+    if args.policy_only:
+        controller = LearnedPolicyOnly(
+            model=model, policy_net=policy_net, normalizer=normalizer, spec=spec, device=device
+        )
+    else:
+        controller = JEPAMPCPolicy(
+            model=model, normalizer=normalizer, spec=spec, device=device,
+            candidates=args.mpc_candidates, horizon=args.mpc_horizon, seed=args.seed + 10_000,
+            method="cem", score_mode="manip", cem_iters=args.cem_iters, action_std=args.action_std,
+            manip_reach_weight=args.manip_reach_weight, manip_path_weight=args.manip_path_weight,
+            scripted_controller=task.controller,
+            policy_net=policy_net, policy_proposal_fraction=args.policy_proposal_fraction,
+        )
 
     goal_rng = np.random.default_rng(args.seed)
     frames, successes, goals = [], [], []

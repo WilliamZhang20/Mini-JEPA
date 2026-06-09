@@ -245,8 +245,20 @@ The earlier sampling-only planner (no learned policy) reached only ~0.40 success
 on the same model — it never reliably grasped. The jump to 1.00 is entirely from
 adding the learned action prior, not from changing the world model.
 
-*(FetchPush-v4 results are produced by the same `train_eval_object_v2.sh`
-pipeline and will be filled in once its run completes.)*
+**FetchPush-v4** (30 episodes, same pipeline):
+
+| Policy / setup | Success | Mean final distance |
+| --- | ---: | ---: |
+| Random | 0.07 | 0.184 |
+| Scripted controller (conventional reference) | 0.97 | 0.031 |
+| JEPA policy (learned, on latent) | 0.93 | 0.033 |
+| JEPA policy + world-model MPC (reach term off) | **1.00** | **0.014** |
+
+Push has a task-specific subtlety: a good push contacts the *far* side of the
+object from the goal, so the gripper-to-object "reach" cost actively misleads the
+planner (it pulls the gripper to the object centre). Turning that term off
+(`--manip-reach-weight 0.0`) lets the world-model MPC refine the learned policy's
+push and it beats the scripted controller on both success and precision.
 
 ## Train The Manipulation Agent (World Model + Policy + MPC)
 
