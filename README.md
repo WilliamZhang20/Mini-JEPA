@@ -211,6 +211,19 @@ The important flags for a pure comparison are:
 
 Those keep evaluation from using the scripted controller as a crutch.
 
+## Model Sizes
+
+The action-conditioned JEPA world models are compact and efficient:
+
+| Task | Model | Parameters |
+| --- | --- | ---: |
+| FetchReach-v4 | reach_goal_focus_deadline | 1.74M |
+| FetchPush-v4 | push_v2 | 2.02M |
+| FetchPickAndPlace-v4 | pickplace_v2 | 2.02M |
+| **Total (all three production models)** | | **5.78M** |
+
+Parameter counts include the encoder, target encoder, dynamics predictor (recurrent GRU-based), state/distance probes, and all embedding layers. Run `python scripts/count_params.py` to recount parameters in all checkpoints.
+
 ## Results Snapshot
 
 These are local results from the development runs. They are included as context,
