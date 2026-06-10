@@ -12,12 +12,16 @@ from .envs import ObsSpec, flatten_obs, goal_reach_distance, obs_spec_from_env
 
 @dataclass
 class Episode:
+    """A single collected trajectory: a sequence of flattened states and the actions between them."""
+
     states: np.ndarray
     actions: np.ndarray
 
 
 @dataclass
 class Normalizer:
+    """Per-dimension state standardizer (z-scoring) with numpy and tensor encode/decode helpers."""
+
     mean: np.ndarray
     std: np.ndarray
 
@@ -216,6 +220,8 @@ def fit_normalizer(episodes: Iterable[Episode], eps: float = 1e-6) -> Normalizer
 
 
 class JEPATrajectoryDataset(Dataset):
+    """Dataset of (state, action sequence, multi-horizon future states) windows sampled from episodes."""
+
     def __init__(
         self,
         episodes: list[Episode],

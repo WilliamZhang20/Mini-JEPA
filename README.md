@@ -356,5 +356,3 @@ Outputs are written under `runs/` and ignored by Git.
 - The learned policy is behaviour-cloned from the scripted experts, so it
   inherits their behaviour; the world model contributes the latent representation
   it runs on and the MPC refinement on top.
-- Checkpoints are not committed. Train locally or attach artifacts through a
-  release if you want to distribute pretrained weights.

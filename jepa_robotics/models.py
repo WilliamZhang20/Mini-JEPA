@@ -8,6 +8,8 @@ import torch.nn.functional as F
 
 
 class MLP(nn.Module):
+    """A simple multi-layer perceptron with optional LayerNorm and SiLU activations."""
+
     def __init__(self, sizes: list[int], layer_norm: bool = False) -> None:
         super().__init__()
         layers: list[nn.Module] = []
@@ -24,6 +26,8 @@ class MLP(nn.Module):
 
 
 class ActionConditionedJEPA(nn.Module):
+    """Action-conditioned JEPA world model: encodes states to a latent and predicts future latents given actions."""
+
     def __init__(
         self,
         *,
@@ -76,20 +80,24 @@ class ActionConditionedJEPA(nn.Module):
         self.reset_target()
 
     def reset_target(self) -> None:
+        """Copy the online encoder weights into the (frozen) target encoder."""
         self.target_encoder.load_state_dict(self.encoder.state_dict())
         for param in self.target_encoder.parameters():
             param.requires_grad_(False)
 
     @torch.no_grad()
     def update_target(self, ema: float) -> None:
+        """Exponential-moving-average update of the target encoder toward the online encoder."""
         for online, target in zip(self.encoder.parameters(), self.target_encoder.parameters()):
             target.data.mul_(ema).add_(online.data, alpha=1.0 - ema)
 
     def encode(self, state: torch.Tensor) -> torch.Tensor:
+        """Map a (normalized) state to its online latent representation."""
         return self.encoder(state)
 
     @torch.no_grad()
     def encode_target(self, state: torch.Tensor) -> torch.Tensor:
+        """Map a state to its latent using the frozen EMA target encoder (used for prediction targets)."""
         return self.target_encoder(state)
 
     def predict_rollout(self, z: torch.Tensor, action_seq: torch.Tensor, horizon: int) -> torch.Tensor:
@@ -118,6 +126,11 @@ class ActionConditionedJEPA(nn.Module):
         return torch.stack(preds, dim=1)
 
     def predict(self, z: torch.Tensor, action_seq: torch.Tensor, horizon: int) -> torch.Tensor:
+        """Predict the latent ``horizon`` steps ahead given the action sequence.
+
+        Uses the last step of a latent rollout for the ``rollout``/``recurrent``
+        modes, or a single padded forward pass for the ``direct`` mode.
+        """
         if self.predictor_mode in ("rollout", "recurrent"):
             return self.predict_rollout(z, action_seq, horizon)[:, -1]
 
@@ -163,11 +176,13 @@ class GoalConditionedPolicy(nn.Module):
 
 
 def normalized_mse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """MSE between L2-normalized prediction and target latents (cosine-style JEPA loss)."""
     pred = F.normalize(pred, dim=-1)
     target = F.normalize(target, dim=-1)
     return F.mse_loss(pred, target)
 
 
 def variance_regularizer(z: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """Hinge penalty pushing each latent dimension's batch std toward 1, to prevent representation collapse."""
     std = torch.sqrt(z.var(dim=0) + eps)
     return torch.mean(F.relu(1.0 - std))

@@ -7,6 +7,8 @@ import numpy as np
 
 @dataclass(frozen=True)
 class ObsSpec:
+    """Dimensions of an environment's observation, goal, flattened state, and action spaces."""
+
     obs_dim: int
     goal_dim: int
     state_dim: int

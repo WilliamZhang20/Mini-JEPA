@@ -6,6 +6,8 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class TaskConfig:
+    """Static description of a Fetch task: env id, controller, episode length, and training horizons."""
+
     name: str
     env_id: str
     slug: str

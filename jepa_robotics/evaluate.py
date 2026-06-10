@@ -26,6 +26,7 @@ from .tasks import resolve_task, task_dir
 
 
 def patch_numpy_pickle_aliases() -> None:
+    """Register ``numpy._core`` module aliases so older SB3 pickles unpickle on newer NumPy."""
     try:
         import numpy.core as numpy_core
     except ImportError:
@@ -44,6 +45,8 @@ def patch_numpy_pickle_aliases() -> None:
 
 
 class Policy(Protocol):
+    """Structural interface for an evaluation policy: a name plus an ``act(obs, env)`` method."""
+
     name: str
 
     def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
@@ -52,6 +55,8 @@ class Policy(Protocol):
 
 @dataclass
 class RandomPolicy:
+    """Baseline policy that samples uniformly from the environment's action space."""
+
     name: str = "random"
 
     def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
@@ -60,6 +65,8 @@ class RandomPolicy:
 
 @dataclass
 class ScriptedGoalPolicy:
+    """Hand-coded geometric controller (reach/push/pick_place) used as a teacher and baseline."""
+
     action_dim: int
     controller: str
     gain: float = 12.0
@@ -72,6 +79,8 @@ class ScriptedGoalPolicy:
 
 
 class SB3Policy:
+    """Wraps a Stable-Baselines3 checkpoint (DDPG/SAC/TD3/PPO) as an evaluation policy."""
+
     def __init__(self, path: Path, name: str = "sb3") -> None:
         from stable_baselines3 import DDPG, PPO, SAC, TD3
 
@@ -100,6 +109,8 @@ class SB3Policy:
 
 
 class JEPAMPCPolicy:
+    """Model-predictive controller that plans action sequences by scoring rollouts of the JEPA world model."""
+
     def __init__(
         self,
         *,
@@ -247,6 +258,7 @@ class JEPAMPCPolicy:
         return scores
 
     def _action_regularizers(self, action_tensor: torch.Tensor) -> torch.Tensor:
+        """Per-candidate L2 magnitude and step-to-step delta penalties that encourage smooth plans."""
         reg = torch.zeros(action_tensor.shape[0], dtype=action_tensor.dtype, device=action_tensor.device)
         if self.action_l2_weight > 0.0:
             reg = reg + self.action_l2_weight * torch.mean(action_tensor.square(), dim=(1, 2))
@@ -270,6 +282,7 @@ class JEPAMPCPolicy:
         obs: dict[str, np.ndarray],
         action_tensor: torch.Tensor,
     ) -> torch.Tensor:
+        """Score each candidate action sequence (lower is better) via the world model and the chosen score mode."""
         raw_state = flatten_obs(obs)
         state = torch.from_numpy(self.normalizer.encode(raw_state)).unsqueeze(0).to(self.device)
         z = self.model.encode(state).repeat(action_tensor.shape[0], 1)
@@ -323,9 +336,11 @@ class JEPAMPCPolicy:
         obs: dict[str, np.ndarray],
         action_seq: np.ndarray,
     ) -> torch.Tensor:
+        """Convenience wrapper that scores a NumPy batch of action sequences."""
         return self._score_action_tensor(obs, torch.from_numpy(action_seq).to(self.device))
 
     def _sample_uniform(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        """Draw candidate action sequences i.i.d. uniformly over the action range, then inject proposals."""
         low = env.action_space.low.astype(np.float32)
         high = env.action_space.high.astype(np.float32)
         action_seq = self.rng.uniform(
@@ -336,6 +351,7 @@ class JEPAMPCPolicy:
         return action_seq
 
     def _inject_scripted_proposals(self, obs, env, action_seq: np.ndarray) -> None:
+        """Overwrite a fraction of candidates with the scripted teacher's action (plus jitter)."""
         proposal_count = int(round(action_seq.shape[0] * self.scripted_proposal_fraction))
         if proposal_count <= 0:
             return
@@ -382,6 +398,7 @@ class JEPAMPCPolicy:
         return np.clip(seq, low, high)
 
     def _inject_policy_proposals(self, obs, env, action_seq: np.ndarray) -> None:
+        """Seed a fraction of candidates with the learned-policy rollout (one clean copy, rest jittered)."""
         if self.policy_net is None or self.policy_proposal_fraction <= 0.0:
             return
         count = int(round(action_seq.shape[0] * self.policy_proposal_fraction))
@@ -399,6 +416,7 @@ class JEPAMPCPolicy:
             action_seq[1:count] = np.clip(action_seq[1:count] + noise, low, high)
 
     def _teacher_action(self, obs, env) -> np.ndarray:
+        """Clipped scripted-controller action used for teacher correction/blending."""
         action = scripted_action(
             obs,
             self.spec.action_dim,
@@ -410,6 +428,7 @@ class JEPAMPCPolicy:
         return np.clip(action, env.action_space.low, env.action_space.high).astype(np.float32)
 
     def _teacher_correction_active(self, obs) -> bool:
+        """Whether the scripted teacher should correct the plan now (enabled and within the goal-distance threshold)."""
         if self.teacher_correction_fraction <= 0.0 or not self.spec.is_goal_env:
             return False
         if np.isinf(self.teacher_correction_threshold):
@@ -418,6 +437,10 @@ class JEPAMPCPolicy:
         return distance <= self.teacher_correction_threshold
 
     def _sample_cem(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        """Cross-Entropy Method planning: iteratively refit a Gaussian over sequences to its elite samples.
+
+        Returns the single best-scoring sequence found across all iterations.
+        """
         low = env.action_space.low.astype(np.float32)
         high = env.action_space.high.astype(np.float32)
         policy_seq = self._policy_rollout(obs, env)
@@ -454,6 +477,11 @@ class JEPAMPCPolicy:
         return best_seq[None, :, :]
 
     def _sample_grad(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        """Gradient-based planning: optimize actions through the differentiable world model with Adam.
+
+        Actions are reparameterized through ``tanh`` to stay in bounds; returns
+        the best-scoring optimized sequence.
+        """
         low = torch.as_tensor(env.action_space.low, dtype=torch.float32, device=self.device)
         high = torch.as_tensor(env.action_space.high, dtype=torch.float32, device=self.device)
         center = (high + low) * 0.5
@@ -494,6 +522,7 @@ class JEPAMPCPolicy:
 
     @torch.no_grad()
     def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        """Plan with the selected method, optionally blend in the teacher, and execute the first action (receding horizon)."""
         teacher_active = self._teacher_correction_active(obs)
         if teacher_active and self.teacher_correction_fraction >= 0.999:
             action = self._teacher_action(obs, env)
@@ -554,6 +583,7 @@ class LearnedPolicyOnly:
 
 
 def load_policy_artifact(path: Path, device: torch.device):
+    """Load a saved GoalConditionedPolicy checkpoint into eval mode; returns ``(policy, config)``."""
     from .models import GoalConditionedPolicy
 
     artifact = torch.load(path, map_location=device, weights_only=False)
@@ -571,6 +601,7 @@ def load_policy_artifact(path: Path, device: torch.device):
 
 
 def load_jepa_artifact(path: Path, device: torch.device):
+    """Rebuild a trained JEPA world model from a checkpoint; returns ``(model, normalizer, spec, config)``."""
     artifact = torch.load(path, map_location=device, weights_only=False)
     spec = ObsSpec(**artifact["spec"])
     config = artifact["config"]
@@ -601,6 +632,7 @@ def rollout_policy(
     video_path: Path | None = None,
     fps: int = 30,
 ) -> dict[str, float | str]:
+    """Run a policy for ``episodes`` episodes and return aggregate metrics, optionally recording a video."""
     successes = []
     final_distances = []
     episode_lengths = []
@@ -658,6 +690,7 @@ def rollout_policy(
 
 
 def make_argparser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser for the cross-evaluation script."""
     parser = argparse.ArgumentParser(description="Cross-evaluate JEPA against classic baselines.")
     parser.add_argument(
         "--task",
@@ -721,6 +754,7 @@ def make_argparser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Load the model, evaluate every baseline and the JEPA-MPC policy on a task, and write JSONL results."""
     args = make_argparser().parse_args()
     task = resolve_task(args.task, args.env_id)
     args.task = task.name
