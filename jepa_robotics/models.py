@@ -38,6 +38,7 @@ class ActionConditionedJEPA(nn.Module):
         max_horizon: int,
         predictor_mode: str = "direct",
         residual_prediction: bool = False,
+        transition_depth: int = 1,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
@@ -46,6 +47,7 @@ class ActionConditionedJEPA(nn.Module):
         self.max_horizon = max_horizon
         self.predictor_mode = predictor_mode
         self.residual_prediction = residual_prediction
+        self.transition_depth = max(1, transition_depth)
 
         self.encoder = MLP([state_dim, hidden_dim, hidden_dim, latent_dim], layer_norm=True)
         self.target_encoder = deepcopy(self.encoder)
@@ -64,12 +66,15 @@ class ActionConditionedJEPA(nn.Module):
             # Recurrent latent dynamics (Dreamer / DINO-WM style). A GRU cell
             # carries the latent through the rollout, which keeps many-step
             # predictions stable and lets the planner score every intermediate
-            # state. A residual MLP refines each gated update.
+            # state. ``transition_depth`` stacked residual MLP blocks then refine
+            # the gated update; depth > 1 adds capacity for the strongly
+            # nonlinear, ballistic dynamics of contact/striking tasks (e.g.
+            # FetchSlide, where the puck coasts long after the strike).
             self.action_encoder = MLP([action_dim, hidden_dim, hidden_dim], layer_norm=True)
             self.gru = nn.GRUCell(hidden_dim + 1, latent_dim)
-            self.transition = MLP(
-                [latent_dim + hidden_dim + 1, hidden_dim, latent_dim],
-                layer_norm=True,
+            self.transition_blocks = nn.ModuleList(
+                MLP([latent_dim + hidden_dim + 1, hidden_dim, latent_dim], layer_norm=True)
+                for _ in range(self.transition_depth)
             )
         else:
             raise ValueError(f"Unknown predictor_mode: {predictor_mode}")
@@ -119,7 +124,8 @@ class ActionConditionedJEPA(nn.Module):
             if self.predictor_mode == "recurrent":
                 gru_in = torch.cat([action_emb, step], dim=-1)
                 pred = self.gru(gru_in, pred)
-                pred = pred + self.transition(torch.cat([pred, action_emb, step], dim=-1))
+                for block in self.transition_blocks:
+                    pred = pred + block(torch.cat([pred, action_emb, step], dim=-1))
             else:  # rollout
                 pred = pred + self.transition(torch.cat([pred, action_emb, step], dim=-1))
             preds.append(pred)
@@ -186,3 +192,18 @@ def variance_regularizer(z: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     """Hinge penalty pushing each latent dimension's batch std toward 1, to prevent representation collapse."""
     std = torch.sqrt(z.var(dim=0) + eps)
     return torch.mean(F.relu(1.0 - std))
+
+
+def covariance_regularizer(z: torch.Tensor) -> torch.Tensor:
+    """Penalize redundant latent dimensions by shrinking off-diagonal covariance.
+
+    Together with the variance hinge, this is the VICReg/Barlow-style version of
+    bounding low-energy latent volume: dimensions must stay active, but cannot
+    all encode the same direction.
+    """
+    if z.shape[0] < 2:
+        return torch.zeros((), dtype=z.dtype, device=z.device)
+    z = z - z.mean(dim=0, keepdim=True)
+    cov = (z.T @ z) / float(z.shape[0] - 1)
+    off_diag = cov - torch.diag(torch.diagonal(cov))
+    return off_diag.pow(2).sum() / z.shape[1]

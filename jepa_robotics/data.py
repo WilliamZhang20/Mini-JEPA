@@ -138,6 +138,76 @@ def scripted_push_action(obs: dict[str, np.ndarray], action_dim: int, gain: floa
     return action
 
 
+# Distance (m) a full-amplitude strike slides the near-frictionless puck;
+# used to scale the strike impulse to the remaining goal distance.
+STRIKE_SPAN = 0.65
+
+
+def scripted_slide_action(obs: dict[str, np.ndarray], action_dim: int, gain: float) -> np.ndarray:
+    """Approach-and-strike controller for FetchSlide.
+
+    The gripper is locked shut and the goal sits *out of reach*, so the arm
+    cannot servo the puck to the target - it has to set up behind the puck (on
+    the side away from the goal), descend to the table, then drive *through* the
+    puck along the puck->goal direction in one committed strike. The strike
+    target overshoots well past the puck so the position command saturates and
+    imparts maximum momentum; control authority is gone once the puck leaves, so
+    the controller stops fussing once the puck is already near the goal.
+    """
+    observation = np.asarray(obs["observation"], dtype=np.float32).reshape(-1)
+    gripper = observation[:3]
+    obj = np.asarray(obs["achieved_goal"], dtype=np.float32).reshape(-1)
+    goal = np.asarray(obs["desired_goal"], dtype=np.float32).reshape(-1)
+    action = np.zeros(action_dim, dtype=np.float32)
+
+    to_goal = goal[:2] - obj[:2]
+    dist = float(np.linalg.norm(to_goal))
+    d = unit_vector(to_goal) if dist > 1e-6 else np.zeros(2, dtype=np.float32)
+    obj_z = float(obj[2])
+
+    # Decompose the gripper's offset from the puck into along-strike (``s``,
+    # negative = behind the puck) and perpendicular (``lat``) components. Keying
+    # the phases on these instead of distance-to-stand-off lets the strike
+    # *commit*: driving forward grows ``s`` but keeps ``lat`` ~0, so the
+    # controller does not abort and re-approach mid-strike.
+    rel = gripper[:2] - obj[:2]
+    s = float(np.dot(rel, d))
+    lat = float(np.linalg.norm(rel - s * d))
+    behind = obj[:2] - 0.07 * d            # stand-off on the far side from the goal
+    low = gripper[2] <= obj_z + 0.03
+    on_line = lat < 0.025 and s < 0.0      # laterally aligned and still behind the puck
+
+    if dist < 0.04:
+        # Puck at the goal (or slid out of reach) - stop fussing.
+        target = gripper.copy()
+    elif not on_line and not low:
+        # Off the strike line and still high: travel over the stand-off point.
+        target = np.array([behind[0], behind[1], obj_z + 0.10], dtype=np.float32)
+    elif not on_line:
+        # Off the strike line but low: lift clear before repositioning.
+        target = np.array([gripper[0], gripper[1], obj_z + 0.10], dtype=np.float32)
+    elif not low:
+        # On the strike line, descend to table height behind the puck.
+        target = np.array([behind[0], behind[1], obj_z], dtype=np.float32)
+    else:
+        # Committed strike. The puck is near-frictionless: a max-speed strike
+        # overshoots short goals badly, so modulate the strike amplitude by the
+        # remaining distance (slide distance grows ~linearly with contact speed).
+        # ``STRIKE_SPAN`` is the distance a full-amplitude strike slides the puck.
+        amp = float(np.clip(dist / STRIKE_SPAN, 0.3, 1.0))
+        action[:2] = amp * d
+        if action_dim >= 3:
+            action[2] = float(np.clip(gain * (obj_z - gripper[2]), -1.0, 1.0))
+        if action_dim >= 4:
+            action[3] = -1.0
+        return action
+
+    action[: min(3, action_dim)] = gain * (target[: min(3, action_dim)] - gripper[: min(3, action_dim)])
+    if action_dim >= 4:
+        action[3] = -1.0  # gripper is locked anyway; keep the command closed
+    return action
+
+
 def scripted_action(
     obs,
     action_dim: int,
@@ -152,6 +222,8 @@ def scripted_action(
         action = scripted_pick_place_action(obs, action_dim, gain)
     elif controller == "push":
         action = scripted_push_action(obs, action_dim, gain)
+    elif controller == "slide":
+        action = scripted_slide_action(obs, action_dim, gain)
     else:
         action = scripted_reach_action(obs, action_dim, gain)
     return action.astype(np.float32)

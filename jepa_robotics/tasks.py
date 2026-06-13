@@ -41,6 +41,16 @@ TASKS = {
         max_episode_steps=100,
         horizons="1,2,4,8,16",
     ),
+    "fetch_slide": TaskConfig(
+        name="fetch_slide",
+        env_id="FetchSlide-v4",
+        slug="fetch_slide",
+        controller="slide",
+        # Striking task: the puck coasts out of reach, so train on longer
+        # horizons to capture the post-contact ballistic phase.
+        max_episode_steps=80,
+        horizons="1,2,4,8,16,24",
+    ),
     "adroit_door": TaskConfig(
         name="adroit_door",
         env_id="AdroitHandDoor-v1",
@@ -58,6 +68,8 @@ def task_from_env(env_id: str) -> TaskConfig:
         return TASKS["fetch_pick_place"]
     if "fetchpush" in env_lower:
         return TASKS["fetch_push"]
+    if "fetchslide" in env_lower:
+        return TASKS["fetch_slide"]
     if "fetchreach" in env_lower:
         return TASKS["fetch_reach"]
     if "adroit" in env_lower and "door" in env_lower:

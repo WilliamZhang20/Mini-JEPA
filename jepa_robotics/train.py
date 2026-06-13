@@ -9,9 +9,9 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-from .data import JEPATrajectoryDataset, collect_episodes, fit_normalizer
+from .data import JEPATrajectoryDataset, Normalizer, collect_episodes, fit_normalizer
 from .envs import ObsSpec, goal_state_from_state, make_env
-from .models import ActionConditionedJEPA, normalized_mse, variance_regularizer
+from .models import ActionConditionedJEPA, covariance_regularizer, normalized_mse, variance_regularizer
 from .tasks import resolve_task, task_dir
 
 
@@ -60,6 +60,7 @@ def compute_loss(
     pred_probe_losses = []
     pred_goal_losses = []
     pred_achieved_losses = []
+    pred_cov_losses = []
     goal_state = build_goal_states(raw_state, normalizer, spec)
     with torch.no_grad():
         goal_z = model.encode_target(goal_state)
@@ -68,6 +69,7 @@ def compute_loss(
         with torch.no_grad():
             target_z = model.encode_target(future_states[:, i])
         pred_losses.append(normalized_mse(pred_z, target_z))
+        pred_cov_losses.append(covariance_regularizer(pred_z))
 
         pred_state = model.state_probe(pred_z)
         pred_probe_losses.append(F.mse_loss(pred_state, future_states[:, i]))
@@ -92,6 +94,8 @@ def compute_loss(
     else:
         loss_pred_achieved = torch.zeros((), dtype=state.dtype, device=device)
     loss_var = variance_regularizer(z)
+    loss_cov = covariance_regularizer(z)
+    loss_pred_cov = torch.stack(pred_cov_losses).mean()
     current_state_probe = model.state_probe(z)
     loss_probe = F.mse_loss(current_state_probe, state)
     loss_distance = F.smooth_l1_loss(model.distance_probe(z), distance)
@@ -114,6 +118,7 @@ def compute_loss(
     total = (
         loss_pred
         + weights["var"] * loss_var
+        + weights["cov"] * loss_cov
         + weights["probe"] * loss_probe
         + weights["achieved"] * loss_achieved
         + weights["distance"] * loss_distance
@@ -121,11 +126,13 @@ def compute_loss(
         + weights["pred_probe"] * loss_pred_probe
         + weights["pred_achieved"] * loss_pred_achieved
         + weights["pred_goal"] * loss_pred_goal
+        + weights["pred_cov"] * loss_pred_cov
     )
     metrics = {
         "loss": float(total.detach().cpu()),
         "pred": float(loss_pred.detach().cpu()),
         "var": float(loss_var.detach().cpu()),
+        "cov": float(loss_cov.detach().cpu()),
         "probe": float(loss_probe.detach().cpu()),
         "achieved": float(loss_achieved.detach().cpu()),
         "distance": float(loss_distance.detach().cpu()),
@@ -133,6 +140,7 @@ def compute_loss(
         "pred_probe": float(loss_pred_probe.detach().cpu()),
         "pred_achieved": float(loss_pred_achieved.detach().cpu()),
         "pred_goal": float(loss_pred_goal.detach().cpu()),
+        "pred_cov": float(loss_pred_cov.detach().cpu()),
     }
     return total, metrics
 
@@ -223,6 +231,7 @@ def save_model_artifact(path: Path, model, normalizer, spec, args) -> None:
                 "max_horizon": max(args.horizons),
                 "predictor_mode": args.predictor_mode,
                 "residual_prediction": args.residual_prediction,
+                "transition_depth": args.transition_depth,
             },
         },
         path,
@@ -234,7 +243,7 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task",
         default=None,
-        choices=["fetch_reach", "fetch_pick_place", "fetch_push", "adroit_door"],
+        choices=["fetch_reach", "fetch_pick_place", "fetch_push", "fetch_slide", "adroit_door"],
     )
     parser.add_argument("--env-id", default=None)
     parser.add_argument("--output-root", type=Path, default=Path("runs"))
@@ -248,6 +257,12 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--predictor-mode", choices=["direct", "rollout", "recurrent"], default="direct")
     parser.add_argument("--residual-prediction", action="store_true")
+    parser.add_argument(
+        "--transition-depth",
+        type=int,
+        default=1,
+        help="Number of stacked residual transition blocks in the recurrent predictor (more capacity for ballistic dynamics).",
+    )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--ema", type=float, default=0.995)
     parser.add_argument("--scripted-fraction", type=float, default=0.6)
@@ -255,6 +270,7 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--action-noise", type=float, default=0.15)
     parser.add_argument("--max-episode-steps", type=int, default=None)
     parser.add_argument("--lambda-var", type=float, default=0.02)
+    parser.add_argument("--lambda-cov", type=float, default=0.0)
     parser.add_argument("--lambda-probe", type=float, default=0.05)
     parser.add_argument("--lambda-achieved", type=float, default=0.0)
     parser.add_argument("--lambda-distance", type=float, default=0.1)
@@ -262,6 +278,7 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda-pred-probe", type=float, default=0.1)
     parser.add_argument("--lambda-pred-achieved", type=float, default=0.0)
     parser.add_argument("--lambda-pred-goal", type=float, default=0.1)
+    parser.add_argument("--lambda-pred-cov", type=float, default=0.0)
     parser.add_argument("--eval-episodes", type=int, default=3)
     parser.add_argument("--mpc-candidates", type=int, default=128)
     parser.add_argument("--mpc-horizon", type=int, default=8)
@@ -278,6 +295,17 @@ def make_argparser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Write checkpoint/model artifacts every N training steps. Disabled when 0.",
+    )
+    parser.add_argument(
+        "--resume-path",
+        type=Path,
+        default=None,
+        help="Optional JEPA training checkpoint to resume from. Keeps architecture fixed but allows new loss weights.",
+    )
+    parser.add_argument(
+        "--no-resume-optimizer",
+        action="store_true",
+        help="Load model weights from --resume-path but start a fresh optimizer.",
     )
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--smoke", action="store_true", help="Use tiny settings for compile/runtime checks.")
@@ -335,7 +363,19 @@ def main() -> None:
         controller=task.controller,
         log_every=args.collect_log_every,
     )
-    normalizer = fit_normalizer(episodes)
+    resume_artifact = None
+    if args.resume_path is not None and args.resume_path.exists():
+        resume_artifact = torch.load(args.resume_path, map_location="cpu", weights_only=False)
+        if "normalizer" in resume_artifact:
+            normalizer = Normalizer(
+                mean=np.asarray(resume_artifact["normalizer"]["mean"], dtype=np.float32),
+                std=np.asarray(resume_artifact["normalizer"]["std"], dtype=np.float32),
+            )
+            print(json.dumps({"event": "resume_normalizer", "path": str(args.resume_path)}), flush=True)
+        else:
+            normalizer = fit_normalizer(episodes)
+    else:
+        normalizer = fit_normalizer(episodes)
     dataset = JEPATrajectoryDataset(episodes, normalizer, spec, args.horizons)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
@@ -347,10 +387,27 @@ def main() -> None:
         max_horizon=max(args.horizons),
         predictor_mode=args.predictor_mode,
         residual_prediction=args.residual_prediction,
+        transition_depth=args.transition_depth,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    if resume_artifact is not None:
+        model.load_state_dict(resume_artifact["model"])
+        if not args.no_resume_optimizer and "optimizer" in resume_artifact:
+            optimizer.load_state_dict(resume_artifact["optimizer"])
+        print(
+            json.dumps(
+                {
+                    "event": "resume_model",
+                    "path": str(args.resume_path),
+                    "step": int(resume_artifact.get("step", 0)),
+                    "resume_optimizer": not args.no_resume_optimizer and "optimizer" in resume_artifact,
+                }
+            ),
+            flush=True,
+        )
     weights = {
         "var": args.lambda_var,
+        "cov": args.lambda_cov,
         "probe": args.lambda_probe,
         "achieved": args.lambda_achieved,
         "distance": args.lambda_distance,
@@ -358,6 +415,7 @@ def main() -> None:
         "pred_probe": args.lambda_pred_probe,
         "pred_achieved": args.lambda_pred_achieved,
         "pred_goal": args.lambda_pred_goal,
+        "pred_cov": args.lambda_pred_cov,
     }
 
     step = 0

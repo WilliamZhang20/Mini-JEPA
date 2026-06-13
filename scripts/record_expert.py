@@ -50,6 +50,8 @@ def main() -> None:
     parser.add_argument("--gain", type=float, default=12.0)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--width", type=int, default=960, help="Render width in px (env default 480).")
+    parser.add_argument("--height", type=int, default=720, help="Render height in px (env default 480).")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument(
         "--vary-goal",
@@ -66,7 +68,8 @@ def main() -> None:
     table_only = task.controller != "pick_place"  # push/reach goals stay on the surface
 
     env = make_env(
-        task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps, render_mode="rgb_array"
+        task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps,
+        render_mode="rgb_array", width=args.width, height=args.height,
     )
     unwrapped = env.unwrapped
     rng = np.random.default_rng(0)

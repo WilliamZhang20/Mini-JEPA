@@ -44,6 +44,30 @@ def patch_numpy_pickle_aliases() -> None:
         sys.modules.setdefault(f"numpy._core.{name}", module)
 
 
+def install_gym_compat_shim() -> None:
+    """Alias the legacy ``gym`` package to ``gymnasium`` so old SB3-zoo pickles load.
+
+    RL-Zoo checkpoints trained on the ``-v1`` Fetch envs were pickled with OpenAI
+    ``gym`` and reference ``gym.spaces.*`` classes. We map those module paths onto
+    ``gymnasium`` (which has the same submodule layout) so unpickling resolves.
+    """
+    import importlib
+    import sys
+
+    try:
+        import gymnasium
+    except ImportError:
+        return
+    sys.modules.setdefault("gym", gymnasium)
+    for sub in ("spaces", "spaces.box", "spaces.dict", "spaces.discrete",
+                "spaces.multi_discrete", "spaces.multi_binary", "spaces.tuple",
+                "spaces.space", "spaces.utils"):
+        try:
+            sys.modules.setdefault(f"gym.{sub}", importlib.import_module(f"gymnasium.{sub}"))
+        except ImportError:
+            continue
+
+
 class Policy(Protocol):
     """Structural interface for an evaluation policy: a name plus an ``act(obs, env)`` method."""
 
@@ -79,24 +103,48 @@ class ScriptedGoalPolicy:
 
 
 class SB3Policy:
-    """Wraps a Stable-Baselines3 checkpoint (DDPG/SAC/TD3/PPO) as an evaluation policy."""
+    """Wraps a Stable-Baselines3 / sb3-contrib checkpoint (TQC/DDPG/SAC/TD3/PPO) as a policy.
 
-    def __init__(self, path: Path, name: str = "sb3") -> None:
+    ``env`` must be supplied for HER checkpoints (e.g. the RL-Zoo Fetch models),
+    whose ``HerReplayBuffer`` requires an environment at load time.
+    """
+
+    def __init__(self, path: Path, name: str = "sb3", env=None) -> None:
         from stable_baselines3 import DDPG, PPO, SAC, TD3
 
         patch_numpy_pickle_aliases()
+        install_gym_compat_shim()
         self.name = name
+        # Override pickled schedules/buffers that don't survive version/Python
+        # changes; none of them are needed for deterministic inference.
         custom_objects = {
             "action_noise": None,
             "replay_buffer": None,
+            # Drop the (HER) replay buffer entirely: not needed for inference and
+            # its saved kwargs (e.g. ``online_sampling``) are stale across versions.
+            "replay_buffer_class": None,
+            "replay_buffer_kwargs": {},
             "_last_obs": None,
             "_last_episode_starts": None,
             "_vec_normalize_env": None,
+            "learning_rate": 0.0,
+            "lr_schedule": lambda _: 0.0,
+            "clip_range": lambda _: 0.0,
+            "exploration_schedule": lambda _: 0.0,
         }
+        algos = [DDPG, SAC, TD3, PPO]
+        try:
+            # TQC (sb3-contrib) is the RL-Zoo algorithm behind the strongest
+            # pretrained Fetch checkpoints; try it first when available.
+            from sb3_contrib import TQC
+
+            algos.insert(0, TQC)
+        except ImportError:
+            pass
         errors = []
-        for cls in (DDPG, SAC, TD3, PPO):
+        for cls in algos:
             try:
-                self.model = cls.load(path, custom_objects=custom_objects)
+                self.model = cls.load(path, env=env, custom_objects=custom_objects)
                 self.name = f"{name}_{cls.__name__.lower()}"
                 return
             except Exception as exc:  # pragma: no cover - depends on external checkpoints.
@@ -600,6 +648,28 @@ def load_policy_artifact(path: Path, device: torch.device):
     return policy, cfg
 
 
+def _remap_legacy_state_dict(state_dict: dict, predictor_mode: str) -> dict:
+    """Map pre-``transition_depth`` recurrent checkpoints onto the current keys.
+
+    The recurrent predictor used to hold a single ``transition`` MLP; it is now a
+    ``transition_blocks`` ModuleList so the depth can be configured. Old
+    checkpoints (depth 1) store ``transition.net.*``, which corresponds exactly
+    to ``transition_blocks.0.net.*``. Only the ``recurrent`` predictor changed -
+    the ``rollout`` predictor still uses a plain ``transition`` and is untouched.
+    """
+    if predictor_mode != "recurrent":
+        return state_dict
+    if any(k.startswith("transition_blocks.") for k in state_dict):
+        return state_dict  # already in the new layout
+    remapped = {}
+    for key, value in state_dict.items():
+        if key.startswith("transition.net."):
+            remapped["transition_blocks.0." + key[len("transition.") :]] = value
+        else:
+            remapped[key] = value
+    return remapped
+
+
 def load_jepa_artifact(path: Path, device: torch.device):
     """Rebuild a trained JEPA world model from a checkpoint; returns ``(model, normalizer, spec, config)``."""
     artifact = torch.load(path, map_location=device, weights_only=False)
@@ -617,8 +687,12 @@ def load_jepa_artifact(path: Path, device: torch.device):
         max_horizon=int(config["max_horizon"]),
         predictor_mode=str(config.get("predictor_mode", "direct")),
         residual_prediction=bool(config.get("residual_prediction", False)),
+        transition_depth=int(config.get("transition_depth", 1)),
     ).to(device)
-    model.load_state_dict(artifact["model"])
+    state_dict = _remap_legacy_state_dict(
+        artifact["model"], str(config.get("predictor_mode", "direct"))
+    )
+    model.load_state_dict(state_dict)
     model.eval()
     return model, normalizer, spec, config
 
@@ -695,7 +769,7 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task",
         default=None,
-        choices=["fetch_reach", "fetch_pick_place", "fetch_push", "adroit_door"],
+        choices=["fetch_reach", "fetch_pick_place", "fetch_push", "fetch_slide", "adroit_door"],
     )
     parser.add_argument("--env-id", default=None)
     parser.add_argument("--output-root", type=Path, default=Path("runs"))
@@ -750,6 +824,8 @@ def make_argparser() -> argparse.ArgumentParser:
         help="Policy name to record, `jepa_mpc` prefix, `all`, or `none`.",
     )
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--width", type=int, default=None, help="Recording width in px (env default 480).")
+    parser.add_argument("--height", type=int, default=None, help="Recording height in px (env default 480).")
     return parser
 
 
@@ -869,6 +945,8 @@ def main() -> None:
             seed=args.seed,
             max_episode_steps=args.max_episode_steps,
             render_mode=render_mode,
+            width=args.width if wants_video else None,
+            height=args.height if wants_video else None,
         )
         video_path = args.video_dir / f"{policy.name}_{task.slug}.mp4" if wants_video else None
         metrics = rollout_policy(

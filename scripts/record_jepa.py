@@ -46,6 +46,8 @@ def main() -> None:
     p.add_argument("--episodes", type=int, default=6)
     p.add_argument("--seed", type=int, default=123)
     p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--width", type=int, default=960, help="Render width in px (env default is 480).")
+    p.add_argument("--height", type=int, default=720, help="Render height in px (env default is 480).")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--vary-goal", action="store_true")
     p.add_argument("--policy-only", action="store_true",
@@ -72,7 +74,8 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     table_only = task.controller != "pick_place"
 
-    env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps, render_mode="rgb_array")
+    env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps,
+                   render_mode="rgb_array", width=args.width, height=args.height)
     unwrapped = env.unwrapped
     if args.policy_only:
         controller = LearnedPolicyOnly(

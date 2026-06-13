@@ -34,6 +34,8 @@ def make_env(
     seed: int | None = None,
     max_episode_steps: int | None = None,
     render_mode: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
 ):
     import gymnasium as gym
 
@@ -43,6 +45,12 @@ def make_env(
         kwargs["max_episode_steps"] = max_episode_steps
     if render_mode is not None:
         kwargs["render_mode"] = render_mode
+    # MuJoCo robotics envs render at 480x480 by default; width/height raise the
+    # offscreen framebuffer resolution for crisper recordings.
+    if width is not None:
+        kwargs["width"] = width
+    if height is not None:
+        kwargs["height"] = height
     env = gym.make(env_id, **kwargs)
     if seed is not None:
         env.action_space.seed(seed)
