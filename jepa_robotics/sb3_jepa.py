@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,30 @@ from gymnasium import spaces
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from .evaluate import load_jepa_artifact
+
+
+def resolve_jepa_model_path(model_path: str | Path) -> Path:
+    """Resolve stale embedded JEPA paths in saved SB3 feature extractors."""
+    path = Path(model_path)
+    if path.exists():
+        return path
+
+    env_fallback = os.environ.get("JEPA_MODEL_FALLBACK")
+    candidates: list[Path] = []
+    if env_fallback:
+        candidates.append(Path(env_fallback))
+    if path.name == "slide_vicreg_resume_20260611_130154_model.pt":
+        candidates.append(path.with_name("slide_vicreg_resume_20260613_model.pt"))
+
+    for candidate in candidates:
+        if candidate.exists():
+            print(
+                f'{{"event": "jepa_model_path_fallback", "missing": "{path}", '
+                f'"using": "{candidate}"}}',
+                flush=True,
+            )
+            return candidate
+    return path
 
 
 class JEPALatentExtractor(BaseFeaturesExtractor):
@@ -30,7 +55,7 @@ class JEPALatentExtractor(BaseFeaturesExtractor):
         layer_norm: bool = False,
     ) -> None:
         load_device = torch.device("cpu")
-        model, normalizer, _spec, config = load_jepa_artifact(Path(model_path), load_device)
+        model, normalizer, _spec, config = load_jepa_artifact(resolve_jepa_model_path(model_path), load_device)
         features_dim = int(config["latent_dim"])
         super().__init__(observation_space, features_dim=features_dim)
 

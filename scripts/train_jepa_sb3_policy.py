@@ -54,10 +54,26 @@ def main() -> None:
     p.add_argument("--checkpoint-freq", type=int, default=50_000)
     p.add_argument("--eval-freq", type=int, default=25_000)
     p.add_argument("--save-replay-buffer", action="store_true")
+    p.add_argument(
+        "--replay-checkpoint-freq",
+        type=int,
+        default=None,
+        help=(
+            "If set with --save-replay-buffer, save full replay-buffer snapshots "
+            "at this lower frequency while keeping lightweight model checkpoints "
+            "at --checkpoint-freq."
+        ),
+    )
     p.add_argument("--replay-buffer-path", type=Path, default=None)
     p.add_argument("--learning-rate", type=float, default=1e-3)
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--learning-starts", type=int, default=1000)
+    p.add_argument("--net-arch", default="512,512,512")
+    p.add_argument("--n-critics", type=int, default=2)
+    p.add_argument("--gamma", type=float, default=0.98)
+    p.add_argument("--tau", type=float, default=0.005)
+    p.add_argument("--buffer-size", type=int, default=1_000_000)
+    p.add_argument("--gradient-steps", type=int, default=1)
     p.add_argument("--fixed-ent-coef", type=float, default=None)
     p.add_argument("--latent-layer-norm", action="store_true")
     p.add_argument("--collapse-critic-loss", type=float, default=100.0)
@@ -101,6 +117,7 @@ def main() -> None:
     video_out.parent.mkdir(parents=True, exist_ok=True)
 
     env = build_env(env_id, max_steps, args.seed)
+    net_arch = [int(part) for part in args.net_arch.split(",") if part.strip()]
     if args.resume and save_model.exists():
         print(f'{{"event": "resume", "model": "{save_model}"}}', flush=True)
         model = TQC.load(str(save_model), env=env, device=args.device)
@@ -110,6 +127,10 @@ def main() -> None:
         warmup_steps = args.resume_warmup_steps if args.resume_warmup_steps is not None else max_steps + 1
         resume_learning_starts = int(getattr(model, "num_timesteps", 0)) + max(0, warmup_steps)
         model.learning_starts = max(int(getattr(model, "learning_starts", 0)), resume_learning_starts)
+        model.batch_size = args.batch_size
+        model.gradient_steps = args.gradient_steps
+        model.gamma = args.gamma
+        model.tau = args.tau
         if args.resume_policy_warmup and warmup_steps > 0:
             original_sample_action = model._sample_action
 
@@ -151,15 +172,16 @@ def main() -> None:
                     device=args.device,
                     layer_norm=args.latent_layer_norm,
                 ),
-                net_arch=[512, 512, 512],
-                n_critics=2,
+                net_arch=net_arch,
+                n_critics=args.n_critics,
             ),
             batch_size=args.batch_size,
-            gamma=0.98,
+            gamma=args.gamma,
             learning_rate=args.learning_rate,
-            tau=0.005,
-            buffer_size=1_000_000,
+            tau=args.tau,
+            buffer_size=args.buffer_size,
             learning_starts=args.learning_starts,
+            gradient_steps=args.gradient_steps,
             ent_coef=args.fixed_ent_coef if args.fixed_ent_coef is not None else "auto",
             verbose=1,
             device=args.device,
@@ -210,8 +232,17 @@ def main() -> None:
         save_freq=args.checkpoint_freq,
         save_path=str(save_model.parent),
         name_prefix=save_model.stem,
-        save_replay_buffer=args.save_replay_buffer,
+        save_replay_buffer=args.save_replay_buffer and args.replay_checkpoint_freq is None,
     )
+    callbacks_list = [TimeBudget(args.train_seconds), ckpt_cb]
+    if args.save_replay_buffer and args.replay_checkpoint_freq is not None:
+        replay_ckpt_cb = CheckpointCallback(
+            save_freq=args.replay_checkpoint_freq,
+            save_path=str(save_model.parent),
+            name_prefix=f"{save_model.stem}_replay_snapshot",
+            save_replay_buffer=True,
+        )
+        callbacks_list.append(replay_ckpt_cb)
     eval_env = build_env(env_id, max_steps, args.seed + 10_000)
     eval_cb = EvalCallback(
         eval_env,
@@ -228,7 +259,8 @@ def main() -> None:
         actor_loss=args.collapse_actor_loss,
         ent_coef=args.collapse_ent_coef,
     )
-    callbacks = CallbackList([TimeBudget(args.train_seconds), ckpt_cb, eval_cb, collapse_guard])
+    callbacks_list.extend([eval_cb, collapse_guard])
+    callbacks = CallbackList(callbacks_list)
     t0 = time.time()
     model.learn(
         total_timesteps=args.total_steps,

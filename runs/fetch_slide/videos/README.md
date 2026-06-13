@@ -5,6 +5,8 @@ Original filenames and nested recorder outputs are preserved in `_archive_origin
 
 - `reference_tqc_rl_success087_ep30.mp4`: TQC+HER reference, 0.867 success over 30 episodes.
 - `jepa_teacher_bc_clean_policy_success077_ep30.mp4`: clean TQC-teacher distillation into JEPA latent policy, 0.767 success over 30 episodes.
+- `jepa_latent_rl_tqc_policywarm25k_best_success080_ep30.mp4`: JEPA-latent TQC policy-warmup continuation best checkpoint, 0.800 success over 30 confirmation episodes.
+- `jepa_latent_rl_tqc_policywarm25k_740k_success090_ep10.mp4`: JEPA-latent TQC policy-warmup 740k checkpoint, 0.900 success over 10 searched/confirmed episodes.
 - `jepa_teacher_bc_policy_success070_ep20.mp4`: earlier TQC-teacher distillation into JEPA latent policy, 0.700 success over 20 episodes.
 - `jepa_latent_rl_tqc_best_success070_ep10.mp4`: pre-collapse JEPA-latent TQC EvalCallback best checkpoint, 0.700 success over 10 triage episodes.
 - `jepa_vicreg_resume_policy_success067_ep6.mp4`: proper regularized JEPA resume policy, 0.667 success over 6 recorded episodes.
