@@ -42,6 +42,20 @@ def main() -> None:
     parser.add_argument("--action-noise", type=float, default=0.1)
     parser.add_argument("--teacher-sb3-path", type=Path, default=None)
     parser.add_argument(
+        "--episodes-npz",
+        type=Path,
+        default=None,
+        help="Behaviour-clone from pre-collected RL-teacher trajectories (.npz) instead of a "
+             "scripted expert or live teacher rollout. Used for Adroit (no scripted controller).",
+    )
+    parser.add_argument(
+        "--her-relabel-frac",
+        type=float,
+        default=0.0,
+        help="Fraction of states whose desired_goal is relabeled to a future achieved_goal "
+             "(hindsight). Makes the BC policy a general nearby-goal reacher for H-JEPA low levels.",
+    )
+    parser.add_argument(
         "--teacher-time-feature",
         action="store_true",
         help="Use SB3's TimeFeatureWrapper for teacher actions, then strip it before JEPA encoding.",
@@ -69,7 +83,18 @@ def main() -> None:
 
     print(json.dumps({"event": "policy_config", "task": task.name, **vars(args)}, default=str), flush=True)
 
-    if args.teacher_sb3_path is None:
+    if args.episodes_npz is not None:
+        # Tier-3 path: behaviour-clone directly from pre-collected RL-teacher
+        # trajectories (same npz the world model trained on). No scripted expert.
+        from .data import load_episodes_npz
+
+        env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
+        spec = obs_spec_from_env(env)
+        env.close()
+        episodes = load_episodes_npz(args.episodes_npz)
+        print(json.dumps({"event": "loaded_episodes_npz", "path": str(args.episodes_npz),
+                          "episodes": len(episodes)}), flush=True)
+    elif args.teacher_sb3_path is None:
         env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
         episodes, _ = collect_episodes(
             env,
@@ -124,6 +149,25 @@ def main() -> None:
             episodes.append(Episode(states=np.asarray(states, dtype=np.float32), actions=np.asarray(actions, dtype=np.float32)))
             episode_idx += 1
         teacher_env.close()
+
+    # Hindsight (HER) relabeling for the low-level: replace each state's
+    # desired_goal with a FUTURE achieved_goal so the policy learns to reach
+    # arbitrary nearby positions (subgoals), not just the demos' final goals.
+    # Essential for using the BC policy as an H-JEPA low-level on big mazes.
+    if args.her_relabel_frac > 0 and spec.is_goal_env and spec.goal_dim > 0:
+        rng_h = np.random.default_rng(args.seed + 99)
+        gs, ge = spec.obs_dim, spec.obs_dim + spec.goal_dim
+        ds, de = spec.obs_dim + spec.goal_dim, spec.obs_dim + 2 * spec.goal_dim
+        relabeled = 0
+        for ep in episodes:
+            S = ep.states
+            T = len(ep.actions)
+            for t in range(T):
+                if rng_h.random() < args.her_relabel_frac:
+                    tf = int(rng_h.integers(t + 1, len(S)))
+                    S[t, ds:de] = S[tf, gs:ge]
+                    relabeled += 1
+        print(json.dumps({"event": "her_relabel", "frac": args.her_relabel_frac, "relabeled": relabeled}), flush=True)
 
     # Flatten to (state, action) pairs; encode states with the frozen JEPA encoder.
     states = np.concatenate([ep.states[:-1] for ep in episodes], axis=0)

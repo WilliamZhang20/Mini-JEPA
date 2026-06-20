@@ -2,13 +2,14 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
-
+.cache
 # Local environments and build outputs
 .venv/
 venv/
 *.egg-info/
 build/
 dist/
+**/*.slurm
 
 # Experiment artifacts
 checkpoints/
@@ -19,6 +20,7 @@ eval_results/
 *.ckpt
 *.zip
 *.jsonl
+runs/**/data/*.npz
 
 # Local scratch/output
 .tmp/

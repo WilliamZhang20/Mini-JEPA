@@ -35,6 +35,46 @@ def build_env(env_id: str, max_steps: int, seed: int, render_mode=None, width=No
     return env
 
 
+def seed_demo_episodes(model, env_id, max_steps, controller, action_dim, n_episodes, gain, seed):
+    """Fill the HER replay buffer with scripted-expert episodes before learning.
+
+    Replicates SB3's terminal-observation handling so HerReplayBuffer stores the
+    true next observation (not the auto-reset one) at episode ends, which is what
+    its future-goal relabeling depends on.
+    """
+    import numpy as np
+    from jepa_robotics.data import scripted_action
+
+    vec = model.get_env()
+    rb = model.replay_buffer
+    rng = np.random.default_rng(seed)
+    low = vec.action_space.low.astype(np.float32)
+    high = vec.action_space.high.astype(np.float32)
+    n_success = 0
+    for ep in range(n_episodes):
+        vec.seed(int(seed + ep))
+        obs = vec.reset()
+        done = np.array([False])
+        last_info = {}
+        while not bool(done[0]):
+            single = {k: np.asarray(v)[0] for k, v in obs.items()}
+            a = scripted_action(single, action_dim, gain, controller, vec.envs[0], rng)
+            action = np.clip(a, low, high).astype(np.float32)[None, :]
+            next_obs, reward, done, infos = vec.step(action)
+            real_next = {k: np.array(v, copy=True) for k, v in next_obs.items()}
+            if bool(done[0]) and infos[0].get("terminal_observation") is not None:
+                term = infos[0]["terminal_observation"]
+                for k in real_next:
+                    real_next[k][0] = term[k]
+            rb.add(obs, real_next, action, reward, done, infos)
+            obs = next_obs
+            last_info = infos[0]
+        n_success += float(last_info.get("is_success", 0.0))
+    print(f'{{"event": "seeded_demos", "episodes": {n_episodes}, '
+          f'"demo_success_rate": {n_success / max(1, n_episodes):.3f}, '
+          f'"replay_size": {rb.size()}}}', flush=True)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="fetch_slide")
@@ -45,6 +85,8 @@ def main() -> None:
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--seed", type=int, default=5)
     p.add_argument("--eval-episodes", type=int, default=30)
+    p.add_argument("--stochastic-eval", action="store_true")
+    p.add_argument("--stochastic-record", action="store_true")
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--width", type=int, default=960)
     p.add_argument("--height", type=int, default=720)
@@ -53,6 +95,11 @@ def main() -> None:
     p.add_argument("--device", default="cuda")
     p.add_argument("--checkpoint-freq", type=int, default=50_000)
     p.add_argument("--eval-freq", type=int, default=25_000)
+    p.add_argument("--demo-episodes", type=int, default=0,
+                   help="Seed the HER replay buffer with this many scripted-expert episodes before "
+                        "learning (demonstration-augmented HER). HER relabels failed strikes too, so "
+                        "even sub-optimal demos densify the sparse strike-credit signal.")
+    p.add_argument("--demo-gain", type=float, default=12.0)
     p.add_argument("--save-replay-buffer", action="store_true")
     p.add_argument(
         "--replay-checkpoint-freq",
@@ -250,7 +297,7 @@ def main() -> None:
         log_path=str(save_model.parent / f"{save_model.stem}_eval"),
         eval_freq=args.eval_freq,
         n_eval_episodes=min(args.eval_episodes, 10),
-        deterministic=True,
+        deterministic=not args.stochastic_eval,
         render=False,
         verbose=1,
     )
@@ -261,6 +308,11 @@ def main() -> None:
     )
     callbacks_list.extend([eval_cb, collapse_guard])
     callbacks = CallbackList(callbacks_list)
+    if args.demo_episodes > 0:
+        seed_demo_episodes(
+            model, env_id, max_steps, task.controller, env.action_space.shape[0],
+            args.demo_episodes, args.demo_gain, args.seed + 777,
+        )
     t0 = time.time()
     model.learn(
         total_timesteps=args.total_steps,
@@ -294,7 +346,7 @@ def main() -> None:
         terminated = truncated = False
         info: dict = {}
         while not (terminated or truncated):
-            action, _ = model.predict(obs, deterministic=True)
+            action, _ = model.predict(obs, deterministic=not args.stochastic_record)
             obs, _, terminated, truncated, info = rec_env.step(action)
             frame = rec_env.render()
             if frame is not None:

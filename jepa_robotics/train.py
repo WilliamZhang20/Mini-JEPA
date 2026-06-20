@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from .data import JEPATrajectoryDataset, Normalizer, collect_episodes, fit_normalizer
 from .envs import ObsSpec, goal_state_from_state, make_env
 from .models import ActionConditionedJEPA, covariance_regularizer, normalized_mse, variance_regularizer
-from .tasks import resolve_task, task_dir
+from .tasks import TASKS, resolve_task, task_dir
 
 
 def parse_horizons(value: str) -> list[int]:
@@ -142,6 +142,11 @@ def compute_loss(
         "pred_goal": float(loss_pred_goal.detach().cpu()),
         "pred_cov": float(loss_pred_cov.detach().cpu()),
     }
+    if getattr(model, "ensemble_heads", 1) > 1:
+        with torch.no_grad():
+            metrics["disagreement"] = float(
+                model.disagreement(z, actions, max(horizons)).detach().cpu()
+            )
     return total, metrics
 
 
@@ -232,6 +237,7 @@ def save_model_artifact(path: Path, model, normalizer, spec, args) -> None:
                 "predictor_mode": args.predictor_mode,
                 "residual_prediction": args.residual_prediction,
                 "transition_depth": args.transition_depth,
+                "ensemble_heads": args.ensemble_heads,
             },
         },
         path,
@@ -243,12 +249,19 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task",
         default=None,
-        choices=["fetch_reach", "fetch_pick_place", "fetch_push", "fetch_slide", "adroit_door"],
+        choices=sorted(TASKS),
     )
     parser.add_argument("--env-id", default=None)
     parser.add_argument("--output-root", type=Path, default=Path("runs"))
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--collect-steps", type=int, default=100_000)
+    parser.add_argument(
+        "--episodes-npz",
+        type=Path,
+        default=None,
+        help="Load pre-collected trajectories (RL-teacher data) from this .npz instead of "
+             "scripted/random collection. Used for tasks with no scripted expert (Adroit).",
+    )
     parser.add_argument("--collect-log-every", type=int, default=10_000)
     parser.add_argument("--train-steps", type=int, default=10_000)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -262,6 +275,14 @@ def make_argparser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Number of stacked residual transition blocks in the recurrent predictor (more capacity for ballistic dynamics).",
+    )
+    parser.add_argument(
+        "--ensemble-heads",
+        type=int,
+        default=1,
+        help="Roadmap A (item 2): number of recurrent dynamics heads. >1 enables an ensemble whose "
+             "inter-head disagreement flags model uncertainty (anti model-exploitation + exploration). "
+             "K=1 is the original single-head model.",
     )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--ema", type=float, default=0.995)
@@ -353,16 +374,27 @@ def main() -> None:
     print(json.dumps({"event": "config", **vars(args), "device": str(device)}, default=str))
 
     env = make_env(args.env_id, seed=args.seed, max_episode_steps=args.max_episode_steps)
-    episodes, spec = collect_episodes(
-        env,
-        num_steps=args.collect_steps,
-        seed=args.seed,
-        scripted_fraction=args.scripted_fraction,
-        controller_gain=args.controller_gain,
-        action_noise=args.action_noise,
-        controller=task.controller,
-        log_every=args.collect_log_every,
-    )
+    if args.episodes_npz is not None:
+        # Tier-3 path: no scripted expert, so train the world model on
+        # pre-collected trajectories from a learned RL teacher (Adroit).
+        from .data import load_episodes_npz
+        from .envs import obs_spec_from_env
+
+        episodes = load_episodes_npz(args.episodes_npz)
+        spec = obs_spec_from_env(env)
+        print(json.dumps({"event": "loaded_episodes_npz", "path": str(args.episodes_npz),
+                          "episodes": len(episodes)}), flush=True)
+    else:
+        episodes, spec = collect_episodes(
+            env,
+            num_steps=args.collect_steps,
+            seed=args.seed,
+            scripted_fraction=args.scripted_fraction,
+            controller_gain=args.controller_gain,
+            action_noise=args.action_noise,
+            controller=task.controller,
+            log_every=args.collect_log_every,
+        )
     resume_artifact = None
     if args.resume_path is not None and args.resume_path.exists():
         resume_artifact = torch.load(args.resume_path, map_location="cpu", weights_only=False)
@@ -388,6 +420,7 @@ def main() -> None:
         predictor_mode=args.predictor_mode,
         residual_prediction=args.residual_prediction,
         transition_depth=args.transition_depth,
+        ensemble_heads=args.ensemble_heads,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     if resume_artifact is not None:
@@ -446,25 +479,31 @@ def main() -> None:
             if step >= args.train_steps:
                 break
 
-    eval_env = make_env(args.env_id, seed=args.seed + 10_000, max_episode_steps=args.max_episode_steps)
-    eval_metrics = evaluate_mpc(
-        model,
-        eval_env,
-        normalizer=normalizer,
-        spec=spec,
-        device=device,
-        episodes=args.eval_episodes,
-        candidates=args.mpc_candidates,
-        horizon=args.mpc_horizon,
-        seed=args.seed + 20_000,
-    )
-    print(json.dumps({"event": "eval", **eval_metrics}))
+    # The built-in eval is goal-reaching MPC; it is meaningless (and indexes
+    # goal slices that don't exist) for non-goal tasks like Adroit, where the
+    # control policy is learned/BC'd separately. Skip it for those.
+    if spec.is_goal_env and spec.goal_dim > 0:
+        eval_env = make_env(args.env_id, seed=args.seed + 10_000, max_episode_steps=args.max_episode_steps)
+        eval_metrics = evaluate_mpc(
+            model,
+            eval_env,
+            normalizer=normalizer,
+            spec=spec,
+            device=device,
+            episodes=args.eval_episodes,
+            candidates=args.mpc_candidates,
+            horizon=args.mpc_horizon,
+            seed=args.seed + 20_000,
+        )
+        eval_env.close()
+        print(json.dumps({"event": "eval", **eval_metrics}))
+    else:
+        print(json.dumps({"event": "eval_skipped", "reason": "non_goal_env"}))
     save_checkpoint(args.save_path, model, optimizer, normalizer, spec, args, step)
     print(json.dumps({"event": "saved", "path": str(args.save_path)}))
     save_model_artifact(args.model_path, model, normalizer, spec, args)
     print(json.dumps({"event": "saved_model", "path": str(args.model_path)}))
     env.close()
-    eval_env.close()
 
 
 if __name__ == "__main__":

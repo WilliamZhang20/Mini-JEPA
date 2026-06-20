@@ -1,0 +1,6 @@
+WM present: yes
+{"event": "policy_saved", "path": "runs/antmaze_umaze/checkpoints/antmaze_umaze_bc_low.pt"}
+{"event": "graph", "landmarks": 50, "edges": 806}
+{"task": "antmaze_umaze", "policy": "FLAT (low-level -> goal)", "episodes": 30, "success_rate": 0.7000}
+{"task": "antmaze_umaze", "policy": "H-JEPA (subgoal graph)", "landmarks": 50, "episodes": 30, "success_rate": 0.9333}
+ANTMAZE_HJEPA_DONE

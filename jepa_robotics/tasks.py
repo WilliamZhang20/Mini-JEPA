@@ -51,6 +51,10 @@ TASKS = {
         max_episode_steps=80,
         horizons="1,2,4,8,16,24",
     ),
+    # Tier 3 — Adroit hand suite. Flat (non-goal) obs, dense reward, 24-30-D
+    # action; no scriptable expert, so data comes from a learned RL teacher (or
+    # exploratory rollouts for the world model). controller="none" -> random
+    # collection. Difficulty order: Door < Hammer < Pen < Relocate.
     "adroit_door": TaskConfig(
         name="adroit_door",
         env_id="AdroitHandDoor-v1",
@@ -58,6 +62,90 @@ TASKS = {
         controller="none",
         max_episode_steps=200,
         horizons="1,2,4,8,16",
+    ),
+    "adroit_hammer": TaskConfig(
+        name="adroit_hammer",
+        env_id="AdroitHandHammer-v1",
+        slug="adroit_hammer",
+        controller="none",
+        max_episode_steps=200,
+        horizons="1,2,4,8,16",
+    ),
+    "adroit_pen": TaskConfig(
+        name="adroit_pen",
+        env_id="AdroitHandPen-v1",
+        slug="adroit_pen",
+        controller="none",
+        max_episode_steps=200,
+        horizons="1,2,4,8,16",
+    ),
+    "adroit_relocate": TaskConfig(
+        name="adroit_relocate",
+        env_id="AdroitHandRelocate-v1",
+        slug="adroit_relocate",
+        controller="none",
+        max_episode_steps=200,
+        horizons="1,2,4,8,16",
+    ),
+    # Tier 2 — PointMaze navigation: 2-D force action, obs = [x, y, vx, vy],
+    # achieved/desired goal = (x, y). Sparse reward, long horizon, walls break
+    # the straight-line heuristic, so the expert is a BFS-waypoint controller
+    # (controller="maze"). Longer training horizons capture the multi-step
+    # glide of the point mass between waypoints.
+    "point_umaze": TaskConfig(
+        name="point_umaze",
+        env_id="PointMaze_UMaze-v3",
+        slug="point_umaze",
+        controller="maze",
+        max_episode_steps=300,
+        horizons="1,2,4,8,16,32",
+    ),
+    "point_medium": TaskConfig(
+        name="point_medium",
+        env_id="PointMaze_Medium-v3",
+        slug="point_medium",
+        controller="maze",
+        max_episode_steps=600,
+        horizons="1,2,4,8,16,32",
+    ),
+    "point_large": TaskConfig(
+        name="point_large",
+        env_id="PointMaze_Large-v3",
+        slug="point_large",
+        controller="maze",
+        max_episode_steps=800,
+        horizons="1,2,4,8,16,32",
+    ),
+    # AntMaze (Tier-2 tail): 8-DoF quadruped locomotion UNDER navigation. Env
+    # version -v4 matches the Minari D4RL offline datasets (27-D obs). No scripted
+    # expert (controller="none"); the low-level is BC on offline data. Used for
+    # the canonical Hierarchical-JEPA demonstration (flat HER fails on ant mazes).
+    "antmaze_umaze": TaskConfig(
+        name="antmaze_umaze",
+        env_id="AntMaze_UMaze-v4",
+        slug="antmaze_umaze",
+        controller="none",
+        max_episode_steps=700,
+        horizons="1,2,4,8,16,32",
+    ),
+    # env_id MUST match the env the Minari dataset was recorded with (same maze
+    # layout), else the BC low-level's maze != the eval maze. The *-diverse-v1
+    # datasets recover to the "*_Diverse_GR-v4" envs.
+    "antmaze_medium": TaskConfig(
+        name="antmaze_medium",
+        env_id="AntMaze_Medium_Diverse_GR-v4",
+        slug="antmaze_medium",
+        controller="none",
+        max_episode_steps=1000,
+        horizons="1,2,4,8,16,32",
+    ),
+    "antmaze_large": TaskConfig(
+        name="antmaze_large",
+        env_id="AntMaze_Large_Diverse_GR-v4",
+        slug="antmaze_large",
+        controller="none",
+        max_episode_steps=1000,
+        horizons="1,2,4,8,16,32",
     ),
 }
 
@@ -72,8 +160,21 @@ def task_from_env(env_id: str) -> TaskConfig:
         return TASKS["fetch_slide"]
     if "fetchreach" in env_lower:
         return TASKS["fetch_reach"]
-    if "adroit" in env_lower and "door" in env_lower:
-        return TASKS["adroit_door"]
+    if "adroit" in env_lower:
+        if "hammer" in env_lower:
+            return TASKS["adroit_hammer"]
+        if "pen" in env_lower:
+            return TASKS["adroit_pen"]
+        if "relocate" in env_lower:
+            return TASKS["adroit_relocate"]
+        if "door" in env_lower:
+            return TASKS["adroit_door"]
+    if "pointmaze" in env_lower:
+        if "large" in env_lower:
+            return TASKS["point_large"]
+        if "medium" in env_lower:
+            return TASKS["point_medium"]
+        return TASKS["point_umaze"]
     slug = (
         env_id.lower()
         .replace("-", "_")

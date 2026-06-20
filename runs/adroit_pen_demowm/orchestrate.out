@@ -1,0 +1,9 @@
+=== WM present: yes ===
+   16      0.2730       0.1570         1.739        0.6261
+{"verdict": "unacceptable", "final_ratio": 1.739, "accept_threshold": 0.7}
+{"event": "policy_saved", "path": "runs/adroit_pen_demowm/checkpoints/pen_bc_on_demowm.pt"}
+{"event": "reward_head_saved", "path": "runs/adroit_pen_demowm/checkpoints/pen_reward_head_demowm.pt"}
+{"task": "adroit_pen", "policy": "BC", "episodes": 20, "success_rate": 0.7500}
+{"task": "adroit_pen", "policy": "BC+WM-MPC", "horizon": 5, "candidates": 200, "episodes": 20, "success_rate": 0.2000}
+{"task": "adroit_pen", "policy": "BC+WM-MPC", "horizon": 5, "candidates": 200, "episodes": 20, "success_rate": 0.5000}
+RETEST_DONE

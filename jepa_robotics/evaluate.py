@@ -22,7 +22,13 @@ from .envs import (
     obs_spec_from_env,
 )
 from .models import ActionConditionedJEPA
-from .tasks import resolve_task, task_dir
+from .scoring import (
+    CommonScoringMixin,
+    GoalScoringMixin,
+    ManipScoringMixin,
+    StrikeScoringMixin,
+)
+from .tasks import TASKS, resolve_task, task_dir
 
 
 def patch_numpy_pickle_aliases() -> None:
@@ -156,7 +162,9 @@ class SB3Policy:
         return np.asarray(action, dtype=np.float32)
 
 
-class JEPAMPCPolicy:
+class JEPAMPCPolicy(
+    CommonScoringMixin, ManipScoringMixin, StrikeScoringMixin, GoalScoringMixin
+):
     """Model-predictive controller that plans action sequences by scoring rollouts of the JEPA world model."""
 
     def __init__(
@@ -191,6 +199,8 @@ class JEPAMPCPolicy:
         scripted_controller: str = "reach",
         policy_net=None,
         policy_proposal_fraction: float = 0.0,
+        open_loop: bool = False,
+        replan_window: int = 0,
     ) -> None:
         self.name = f"jepa_mpc_{method}_{score_mode}"
         if action_l2_weight > 0.0 or action_delta_weight > 0.0 or execute_smoothing > 0.0:
@@ -238,92 +248,28 @@ class JEPAMPCPolicy:
         self.rng = np.random.default_rng(seed)
         self.prev_action = np.zeros(spec.action_dim, dtype=np.float32)
         self.prev_plan: np.ndarray | None = None
+        # Open-loop "strike" control: plan the full horizon once (and optionally
+        # keep re-planning only during a short contact/approach window), then
+        # commit and execute the cached plan open-loop. Matched to ballistic
+        # tasks (FetchSlide) where there is no corrective authority after contact
+        # and receding-horizon re-planning every step is counterproductive.
+        self.open_loop = bool(open_loop)
+        self.replan_window = int(replan_window)
+        if self.open_loop:
+            self.name = f"{self.name}_openloop{self.horizon}"
+            if self.replan_window > 0:
+                self.name = f"{self.name}_rw{self.replan_window}"
+        self._committed_plan: np.ndarray | None = None
+        self._plan_cursor = 0
+        self._episode_step = 0
 
-    def _manip_scores(
-        self,
-        raw_state: np.ndarray,
-        z: torch.Tensor,
-        action_tensor: torch.Tensor,
-    ) -> torch.Tensor:
-        """Staged grasp-aware manipulation cost over the whole predicted trajectory.
-
-        Rolls the latent dynamics out for the full horizon, decodes every
-        intermediate state, and combines several dense sub-costs that together
-        encode the reach -> align -> grasp -> lift -> transport phases of a pick.
-
-        Why this is needed: the object-to-goal distance is *flat* until the
-        object is actually grasped (the block does not move on its own), so a
-        planner that scores only that distance gets no gradient and never
-        discovers the grasp. Each sub-cost below is dense in a different phase:
-
-        * ``align``  - gripper x/y over the object (so a descent can grasp it),
-        * ``reach``  - full 3D gripper->object distance,
-        * ``grasp``  - *close the fingers when the gripper is on the object*;
-          this is the catalyst term. Without it the gripper command oscillates
-          and the block is never picked up.
-        * ``path``/``terminal`` - object-to-goal distance (the real objective),
-          which becomes informative only once the grasp makes the object movable.
-        """
-        traj_z = self.model.predict_rollout(z, action_tensor, self.horizon)
-        pred_state = self.normalizer.decode_tensor(self.model.state_probe(traj_z))
-
-        grip = pred_state[..., :3]
-        obj_start = self.spec.obs_dim
-        obj = pred_state[..., obj_start : obj_start + self.spec.goal_dim]
-        desired_start = self.spec.obs_dim + self.spec.goal_dim
-        desired = torch.as_tensor(
-            raw_state[desired_start : desired_start + self.spec.goal_dim],
-            dtype=pred_state.dtype,
-            device=pred_state.device,
-        ).view(1, 1, -1)
-
-        gd = min(3, self.spec.goal_dim)
-        obj_to_goal = torch.linalg.norm(obj - desired, dim=-1)                 # [B, H]
-        grip_to_obj = torch.linalg.norm(grip[..., :gd] - obj[..., :gd], dim=-1)  # [B, H]
-        align_xy = torch.linalg.norm(grip[..., :2] - obj[..., :2], dim=-1)       # [B, H]
-
-        terminal = obj_to_goal[:, -1]
-        path = obj_to_goal.mean(dim=1)
-        reach = grip_to_obj.mean(dim=1)
-        align = align_xy.mean(dim=1)
-        scores = (
-            terminal
-            + self.manip_path_weight * path
-            + self.manip_reach_weight * reach
-            + self.manip_align_weight * align
-        )
-
-        # Grasp catalyst: when the gripper is on the object, reward closing the
-        # fingers. Gripper command > 0 opens, < 0 closes, so we penalise an open
-        # command weighted by how close the gripper is to the object.
-        if self.manip_grasp_weight > 0.0 and action_tensor.shape[-1] >= 4:
-            nearness = torch.exp(-grip_to_obj / 0.04)                          # [B, H], ~1 on the object
-            open_cmd = torch.clamp(action_tensor[..., 3], min=-1.0)            # [B, H]
-            grasp = (nearness * (open_cmd + 1.0)).mean(dim=1)                  # 0 when closed on object
-            scores = scores + self.manip_grasp_weight * grasp
-
-        scores = scores + self._action_regularizers(action_tensor)
-        return scores
-
-    def _action_regularizers(self, action_tensor: torch.Tensor) -> torch.Tensor:
-        """Per-candidate L2 magnitude and step-to-step delta penalties that encourage smooth plans."""
-        reg = torch.zeros(action_tensor.shape[0], dtype=action_tensor.dtype, device=action_tensor.device)
-        if self.action_l2_weight > 0.0:
-            reg = reg + self.action_l2_weight * torch.mean(action_tensor.square(), dim=(1, 2))
-        if self.action_delta_weight > 0.0:
-            prev = torch.as_tensor(
-                self.prev_action,
-                dtype=action_tensor.dtype,
-                device=action_tensor.device,
-            ).view(1, 1, -1)
-            first_delta = action_tensor[:, :1] - prev
-            seq_delta = action_tensor[:, 1:] - action_tensor[:, :-1]
-            if seq_delta.numel() == 0:
-                delta_cost = torch.mean(first_delta.square(), dim=(1, 2))
-            else:
-                delta_cost = torch.cat([first_delta, seq_delta], dim=1).square().mean(dim=(1, 2))
-            reg = reg + self.action_delta_weight * delta_cost
-        return reg
+    def reset(self) -> None:
+        """Clear cached plan/state at the start of a new episode."""
+        self.prev_action = np.zeros(self.spec.action_dim, dtype=np.float32)
+        self.prev_plan = None
+        self._committed_plan = None
+        self._plan_cursor = 0
+        self._episode_step = 0
 
     def _score_action_tensor(
         self,
@@ -337,48 +283,9 @@ class JEPAMPCPolicy:
 
         if self.score_mode == "manip":
             return self._manip_scores(raw_state, z, action_tensor)
-
-        pred_z = self.model.predict(z, action_tensor, self.horizon)
-
-        scores = torch.zeros(action_tensor.shape[0], dtype=pred_z.dtype, device=self.device)
-        if self.score_mode in ("latent", "combined"):
-            goal_state = goal_state_from_state(raw_state, self.spec)
-            goal_norm = torch.from_numpy(self.normalizer.encode(goal_state)).unsqueeze(0).to(self.device)
-            goal_z = self.model.encode_target(goal_norm)
-            latent_scores = torch.sum(
-                (F.normalize(pred_z, dim=-1) - F.normalize(goal_z, dim=-1)) ** 2,
-                dim=-1,
-            )
-            scores = scores + latent_scores
-        if self.score_mode in ("state", "combined"):
-            pred_state_norm = self.model.state_probe(pred_z)
-            pred_state = self.normalizer.decode_tensor(pred_state_norm)
-            achieved = pred_state[:, self.spec.obs_dim : self.spec.obs_dim + self.spec.goal_dim]
-            desired_start = self.spec.obs_dim + self.spec.goal_dim
-            desired = torch.as_tensor(
-                raw_state[desired_start : desired_start + self.spec.goal_dim],
-                dtype=pred_state.dtype,
-                device=pred_state.device,
-            ).unsqueeze(0)
-            state_scores = torch.linalg.norm(achieved - desired, dim=-1)
-            scores = scores + state_scores
-        if self.action_l2_weight > 0.0:
-            scores = scores + self.action_l2_weight * torch.mean(action_tensor.square(), dim=(1, 2))
-        if self.action_delta_weight > 0.0:
-            prev = torch.as_tensor(
-                self.prev_action,
-                dtype=action_tensor.dtype,
-                device=action_tensor.device,
-            ).view(1, 1, -1)
-            first_delta = action_tensor[:, :1] - prev
-            seq_delta = action_tensor[:, 1:] - action_tensor[:, :-1]
-            if seq_delta.numel() == 0:
-                delta_cost = torch.mean(first_delta.square(), dim=(1, 2))
-            else:
-                delta_cost = torch.cat([first_delta, seq_delta], dim=1).square().mean(dim=(1, 2))
-            scores = scores + self.action_delta_weight * delta_cost
-        return scores
-
+        if self.score_mode == "strike":
+            return self._strike_scores(raw_state, z, action_tensor)
+        return self._goal_scores(raw_state, z, action_tensor)
     def _score_sequences(
         self,
         obs: dict[str, np.ndarray],
@@ -568,16 +475,8 @@ class JEPAMPCPolicy:
             best = int(torch.argmin(scores).detach().cpu())
             return action_tensor[best : best + 1].detach().cpu().numpy().astype(np.float32)
 
-    @torch.no_grad()
-    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
-        """Plan with the selected method, optionally blend in the teacher, and execute the first action (receding horizon)."""
-        teacher_active = self._teacher_correction_active(obs)
-        if teacher_active and self.teacher_correction_fraction >= 0.999:
-            action = self._teacher_action(obs, env)
-            self.prev_action = action
-            self.prev_plan = np.repeat(action[None, :], self.horizon, axis=0)
-            return action
-
+    def _best_plan(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        """Plan with the selected method and return the best full action sequence ``[horizon, action_dim]``."""
         if self.method == "cem":
             action_seq = self._sample_cem(obs, env)
         elif self.method == "grad":
@@ -586,7 +485,38 @@ class JEPAMPCPolicy:
             action_seq = self._sample_uniform(obs, env)
         scores = self._score_sequences(obs, action_seq)
         best = int(torch.argmin(scores).cpu())
-        chosen_plan = action_seq[best].copy()
+        return action_seq[best].copy()
+
+    @torch.no_grad()
+    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        """Plan with the selected method, optionally blend in the teacher, and execute the first action (receding horizon)."""
+        if self.open_loop:
+            if self._episode_step < self.replan_window:
+                # Approach/contact window: keep re-planning (receding) so the
+                # arm can home in on the puck and time the strike.
+                chosen_plan = self._best_plan(obs, env)
+                raw_action = chosen_plan[0].copy()
+                self._committed_plan = None
+            else:
+                # Committed: execute the planned strike + coast open-loop.
+                if self._committed_plan is None or self._plan_cursor >= len(self._committed_plan):
+                    self._committed_plan = self._best_plan(obs, env)
+                    self._plan_cursor = 0
+                raw_action = self._committed_plan[self._plan_cursor].copy()
+                self._plan_cursor += 1
+            self._episode_step += 1
+            action = np.asarray(raw_action, dtype=np.float32)
+            self.prev_action = action
+            return action
+
+        teacher_active = self._teacher_correction_active(obs)
+        if teacher_active and self.teacher_correction_fraction >= 0.999:
+            action = self._teacher_action(obs, env)
+            self.prev_action = action
+            self.prev_plan = np.repeat(action[None, :], self.horizon, axis=0)
+            return action
+
+        chosen_plan = self._best_plan(obs, env)
         raw_action = chosen_plan[0].copy()
         if teacher_active:
             teacher_action = self._teacher_action(obs, env)
@@ -686,6 +616,7 @@ def load_jepa_artifact(path: Path, device: torch.device):
         hidden_dim=int(config["hidden_dim"]),
         max_horizon=int(config["max_horizon"]),
         predictor_mode=str(config.get("predictor_mode", "direct")),
+        ensemble_heads=int(config.get("ensemble_heads", 1)),
         residual_prediction=bool(config.get("residual_prediction", False)),
         transition_depth=int(config.get("transition_depth", 1)),
     ).to(device)
@@ -716,6 +647,8 @@ def rollout_policy(
 
     for episode_idx in range(episodes):
         obs, _ = env.reset(seed=seed + episode_idx)
+        if hasattr(policy, "reset"):
+            policy.reset()
         if video_path is not None and episode_idx == 0:
             frame = env.render()
             if frame is not None:
@@ -769,7 +702,7 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task",
         default=None,
-        choices=["fetch_reach", "fetch_pick_place", "fetch_push", "fetch_slide", "adroit_door"],
+        choices=sorted(TASKS),
     )
     parser.add_argument("--env-id", default=None)
     parser.add_argument("--output-root", type=Path, default=Path("runs"))
@@ -783,7 +716,7 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--mpc-candidates", type=int, default=128)
     parser.add_argument("--mpc-horizon", type=int, default=8)
     parser.add_argument("--mpc-method", choices=["random", "cem", "grad"], default="random")
-    parser.add_argument("--mpc-score", choices=["latent", "state", "combined", "manip"], default="latent")
+    parser.add_argument("--mpc-score", choices=["latent", "state", "combined", "manip", "strike"], default="latent")
     parser.add_argument("--cem-iters", type=int, default=3)
     parser.add_argument("--elite-frac", type=float, default=0.1)
     parser.add_argument("--action-std", type=float, default=0.7)
@@ -799,6 +732,12 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--action-delta-weight", type=float, default=0.0)
     parser.add_argument("--execute-smoothing", type=float, default=0.0)
     parser.add_argument("--no-warm-start-cem", action="store_true")
+    parser.add_argument("--open-loop", action="store_true",
+                        help="Plan-once strike control: commit a full-horizon plan and execute it open-loop "
+                             "(matched to ballistic 'commit then watch' tasks like FetchSlide).")
+    parser.add_argument("--replan-window", type=int, default=0,
+                        help="With --open-loop, keep receding-horizon re-planning for this many initial steps "
+                             "(the approach/contact phase) before committing to the open-loop plan.")
     parser.add_argument("--grad-iters", type=int, default=30)
     parser.add_argument("--grad-lr", type=float, default=0.08)
     parser.add_argument("--scripted-gain", type=float, default=12.0)
@@ -912,6 +851,8 @@ def main() -> None:
             scripted_controller=task.controller,
             policy_net=policy_net,
             policy_proposal_fraction=args.policy_proposal_fraction,
+            open_loop=args.open_loop,
+            replan_window=args.replan_window,
         )
     )
     sb3_error = None

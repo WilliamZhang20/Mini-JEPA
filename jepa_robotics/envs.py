@@ -51,10 +51,41 @@ def make_env(
         kwargs["width"] = width
     if height is not None:
         kwargs["height"] = height
+    # PointMaze/AntMaze default to a *continuing* task (the goal resamples after
+    # every reach and the episode never terminates), which is wrong for our
+    # goal-reaching HER setup. Force one fixed goal per episode that terminates
+    # on success, matching the Fetch goal envs.
+    if "PointMaze" in env_id or "AntMaze" in env_id:
+        kwargs.setdefault("continuing_task", False)
+        kwargs.setdefault("reset_target", False)
     env = gym.make(env_id, **kwargs)
+    # Maze and Adroit envs report ``info["success"]``; the rest of the pipeline
+    # (HER EvalCallback, eval scripts) reads ``info["is_success"]``. Alias it.
+    # Harmless elsewhere (only added when ``success`` is present and
+    # ``is_success`` is not), so it is safe to apply broadly.
+    if "Maze" in env_id or "Adroit" in env_id:
+        env = SuccessAliasWrapper(env)
     if seed is not None:
         env.action_space.seed(seed)
     return env
+
+
+def _make_success_alias_wrapper():
+    import gymnasium as gym
+
+    class _SuccessAlias(gym.Wrapper):
+        """Expose ``info['is_success']`` (mirroring ``info['success']``) for maze envs."""
+
+        def step(self, action):
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            if "is_success" not in info and "success" in info:
+                info["is_success"] = float(info["success"])
+            return obs, reward, terminated, truncated, info
+
+    return _SuccessAlias
+
+
+SuccessAliasWrapper = _make_success_alias_wrapper()
 
 
 def flatten_obs(obs) -> np.ndarray:

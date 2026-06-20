@@ -4,25 +4,8 @@ from copy import deepcopy
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 
-
-class MLP(nn.Module):
-    """A simple multi-layer perceptron with optional LayerNorm and SiLU activations."""
-
-    def __init__(self, sizes: list[int], layer_norm: bool = False) -> None:
-        super().__init__()
-        layers: list[nn.Module] = []
-        for i in range(len(sizes) - 1):
-            layers.append(nn.Linear(sizes[i], sizes[i + 1]))
-            if i < len(sizes) - 2:
-                if layer_norm:
-                    layers.append(nn.LayerNorm(sizes[i + 1]))
-                layers.append(nn.SiLU())
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+from .mlp import MLP
 
 
 class ActionConditionedJEPA(nn.Module):
@@ -39,6 +22,7 @@ class ActionConditionedJEPA(nn.Module):
         predictor_mode: str = "direct",
         residual_prediction: bool = False,
         transition_depth: int = 1,
+        ensemble_heads: int = 1,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
@@ -48,6 +32,7 @@ class ActionConditionedJEPA(nn.Module):
         self.predictor_mode = predictor_mode
         self.residual_prediction = residual_prediction
         self.transition_depth = max(1, transition_depth)
+        self.ensemble_heads = max(1, ensemble_heads)
 
         self.encoder = MLP([state_dim, hidden_dim, hidden_dim, latent_dim], layer_norm=True)
         self.target_encoder = deepcopy(self.encoder)
@@ -76,6 +61,24 @@ class ActionConditionedJEPA(nn.Module):
                 MLP([latent_dim + hidden_dim + 1, hidden_dim, latent_dim], layer_norm=True)
                 for _ in range(self.transition_depth)
             )
+            # Roadmap A (item 2): ensemble dynamics. Extra independent recurrent
+            # heads (sharing only the action encoder) give an inter-head
+            # *disagreement* signal that flags where the model is uncertain --
+            # the known fix for model-exploitation in planning, and an
+            # exploration signal for data collection. K=1 keeps the original
+            # single-head parameter layout so existing checkpoints still load.
+            if self.ensemble_heads > 1:
+                self.ensemble_grus = nn.ModuleList(
+                    nn.GRUCell(hidden_dim + 1, latent_dim)
+                    for _ in range(self.ensemble_heads - 1)
+                )
+                self.ensemble_blocks = nn.ModuleList(
+                    nn.ModuleList(
+                        MLP([latent_dim + hidden_dim + 1, hidden_dim, latent_dim], layer_norm=True)
+                        for _ in range(self.transition_depth)
+                    )
+                    for _ in range(self.ensemble_heads - 1)
+                )
         else:
             raise ValueError(f"Unknown predictor_mode: {predictor_mode}")
         # A wider, two-hidden-layer state decoder: accurate geometry (gripper +
@@ -105,12 +108,8 @@ class ActionConditionedJEPA(nn.Module):
         """Map a state to its latent using the frozen EMA target encoder (used for prediction targets)."""
         return self.target_encoder(state)
 
-    def predict_rollout(self, z: torch.Tensor, action_seq: torch.Tensor, horizon: int) -> torch.Tensor:
-        """Roll the latent dynamics forward and return every intermediate latent.
-
-        Returns a tensor of shape ``[batch, horizon, latent_dim]``. Only valid
-        for the ``rollout`` and ``recurrent`` predictor modes.
-        """
+    def _recurrent_head(self, z, action_seq, horizon, gru, blocks):
+        """Roll one recurrent dynamics head; returns ``[batch, horizon, latent]``."""
         preds = []
         pred = z
         for i in range(horizon):
@@ -121,13 +120,60 @@ class ActionConditionedJEPA(nn.Module):
                 device=action_seq.device,
             )
             action_emb = self.action_encoder(action_seq[:, i])
-            if self.predictor_mode == "recurrent":
-                gru_in = torch.cat([action_emb, step], dim=-1)
-                pred = self.gru(gru_in, pred)
-                for block in self.transition_blocks:
-                    pred = pred + block(torch.cat([pred, action_emb, step], dim=-1))
-            else:  # rollout
-                pred = pred + self.transition(torch.cat([pred, action_emb, step], dim=-1))
+            gru_in = torch.cat([action_emb, step], dim=-1)
+            pred = gru(gru_in, pred)
+            for block in blocks:
+                pred = pred + block(torch.cat([pred, action_emb, step], dim=-1))
+            preds.append(pred)
+        return torch.stack(preds, dim=1)
+
+    def _heads(self):
+        """Iterate (gru, transition_blocks) over the primary head and any ensemble heads."""
+        yield self.gru, self.transition_blocks
+        if self.ensemble_heads > 1:
+            for gru, blocks in zip(self.ensemble_grus, self.ensemble_blocks):
+                yield gru, blocks
+
+    def rollout_heads(self, z: torch.Tensor, action_seq: torch.Tensor, horizon: int) -> torch.Tensor:
+        """Per-head recurrent rollouts, shape ``[num_heads, batch, horizon, latent]``."""
+        return torch.stack(
+            [self._recurrent_head(z, action_seq, horizon, g, b) for g, b in self._heads()],
+            dim=0,
+        )
+
+    def disagreement(self, z: torch.Tensor, action_seq: torch.Tensor, horizon: int) -> torch.Tensor:
+        """Mean across-head latent variance over the rollout (epistemic uncertainty).
+
+        Zero unless this is an ensemble recurrent model. Used as an MPC cost term
+        (avoid model-exploitation) and an exploration signal (Roadmap A, item 2).
+        """
+        if self.predictor_mode != "recurrent" or self.ensemble_heads <= 1:
+            return torch.zeros((), device=z.device, dtype=z.dtype)
+        return self.rollout_heads(z, action_seq, horizon).var(dim=0).mean()
+
+    def predict_rollout(self, z: torch.Tensor, action_seq: torch.Tensor, horizon: int) -> torch.Tensor:
+        """Roll the latent dynamics forward and return every intermediate latent.
+
+        Returns a tensor of shape ``[batch, horizon, latent_dim]``. For an
+        ensemble recurrent model this is the across-head mean. Only valid for the
+        ``rollout`` and ``recurrent`` predictor modes.
+        """
+        if self.predictor_mode == "recurrent":
+            if self.ensemble_heads > 1:
+                return self.rollout_heads(z, action_seq, horizon).mean(dim=0)
+            return self._recurrent_head(z, action_seq, horizon, self.gru, self.transition_blocks)
+        # rollout mode: single shared transition (no ensemble support)
+        preds = []
+        pred = z
+        for i in range(horizon):
+            step = torch.full(
+                (action_seq.shape[0], 1),
+                float(i + 1) / float(self.max_horizon),
+                dtype=action_seq.dtype,
+                device=action_seq.device,
+            )
+            action_emb = self.action_encoder(action_seq[:, i])
+            pred = pred + self.transition(torch.cat([pred, action_emb, step], dim=-1))
             preds.append(pred)
         return torch.stack(preds, dim=1)
 
@@ -159,51 +205,3 @@ class ActionConditionedJEPA(nn.Module):
         if self.residual_prediction:
             pred = z + pred
         return pred
-
-
-class GoalConditionedPolicy(nn.Module):
-    """A small action prior learned on the JEPA latent representation.
-
-    The JEPA encoder maps the full observation (which already includes the
-    desired goal) to a latent ``z``; this policy maps ``z`` to an action. It is
-    trained by behaviour cloning on the collected trajectories, i.e. purely
-    self-supervised from the same data the world model uses. It is not meant to
-    be the final controller on its own - it is the *proposal* that the
-    world-model MPC refines, which is what makes precise contact skills like
-    grasping reliable.
-    """
-
-    def __init__(self, *, latent_dim: int, action_dim: int, hidden_dim: int) -> None:
-        super().__init__()
-        self.net = MLP([latent_dim, hidden_dim, hidden_dim, action_dim], layer_norm=True)
-
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(self.net(z))
-
-
-def normalized_mse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """MSE between L2-normalized prediction and target latents (cosine-style JEPA loss)."""
-    pred = F.normalize(pred, dim=-1)
-    target = F.normalize(target, dim=-1)
-    return F.mse_loss(pred, target)
-
-
-def variance_regularizer(z: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
-    """Hinge penalty pushing each latent dimension's batch std toward 1, to prevent representation collapse."""
-    std = torch.sqrt(z.var(dim=0) + eps)
-    return torch.mean(F.relu(1.0 - std))
-
-
-def covariance_regularizer(z: torch.Tensor) -> torch.Tensor:
-    """Penalize redundant latent dimensions by shrinking off-diagonal covariance.
-
-    Together with the variance hinge, this is the VICReg/Barlow-style version of
-    bounding low-energy latent volume: dimensions must stay active, but cannot
-    all encode the same direction.
-    """
-    if z.shape[0] < 2:
-        return torch.zeros((), dtype=z.dtype, device=z.device)
-    z = z - z.mean(dim=0, keepdim=True)
-    cov = (z.T @ z) / float(z.shape[0] - 1)
-    off_diag = cov - torch.diag(torch.diagonal(cov))
-    return off_diag.pow(2).sum() / z.shape[1]

@@ -1,0 +1,26 @@
+"""JEPA model components, split by responsibility.
+
+``ActionConditionedJEPA`` is the shared action-conditioned world model used
+across all tasks (Fetch, PointMaze, ...). Per-task behaviour lives in the
+data experts (data.py), task configs (tasks.py) and MPC scoring (scoring/),
+not in the model itself. Components are split into submodules for clarity and
+to make Roadmap-A extensions (ensemble heads, stochastic latent) additive.
+"""
+
+from .mlp import MLP
+from .world_model import ActionConditionedJEPA
+from .policy import GoalConditionedPolicy
+from .regularizers import (
+    covariance_regularizer,
+    normalized_mse,
+    variance_regularizer,
+)
+
+__all__ = [
+    "MLP",
+    "ActionConditionedJEPA",
+    "GoalConditionedPolicy",
+    "normalized_mse",
+    "variance_regularizer",
+    "covariance_regularizer",
+]

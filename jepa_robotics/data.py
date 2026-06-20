@@ -208,6 +208,62 @@ def scripted_slide_action(obs: dict[str, np.ndarray], action_dim: int, gain: flo
     return action
 
 
+def _maze_bfs(maze_map, start_rc, goal_rc):
+    """Shortest 4-connected path of (row, col) cells through the free squares of the maze."""
+    from collections import deque
+
+    rows, cols = len(maze_map), len(maze_map[0])
+
+    def free(rc):
+        r, c = rc
+        return 0 <= r < rows and 0 <= c < cols and int(maze_map[r][c]) != 1
+
+    if not free(start_rc) or not free(goal_rc):
+        return None
+    prev = {start_rc: None}
+    q = deque([start_rc])
+    while q:
+        cur = q.popleft()
+        if cur == goal_rc:
+            path = []
+            node = cur
+            while node is not None:
+                path.append(node)
+                node = prev[node]
+            return path[::-1]
+        r, c = cur
+        for nb in ((r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)):
+            if free(nb) and nb not in prev:
+                prev[nb] = cur
+                q.append(nb)
+    return None
+
+
+def scripted_maze_action(obs: dict[str, np.ndarray], action_dim: int, gain: float, env) -> np.ndarray:
+    """BFS-waypoint + PD controller for PointMaze: follow the shortest free-cell path to the goal.
+
+    Straight-line-to-goal fails against walls, so we plan a cell path through the
+    maze map (exposed on ``env.unwrapped.maze``), steer toward the next waypoint
+    cell centre, and damp velocity so the point mass does not overshoot corners.
+    """
+    maze = env.unwrapped.maze
+    pos = np.asarray(obs["achieved_goal"], dtype=np.float32)[:2]
+    goal = np.asarray(obs["desired_goal"], dtype=np.float32)[:2]
+    vel = np.asarray(obs["observation"], dtype=np.float32)[2:4]
+
+    cur_rc = tuple(int(v) for v in maze.cell_xy_to_rowcol(pos))
+    goal_rc = tuple(int(v) for v in maze.cell_xy_to_rowcol(goal))
+    waypoint = goal
+    if cur_rc != goal_rc:
+        path = _maze_bfs(maze.maze_map, cur_rc, goal_rc)
+        if path and len(path) >= 2:
+            waypoint = np.asarray(maze.cell_rowcol_to_xy(np.array(path[1])), dtype=np.float32)[:2]
+
+    direction = waypoint - pos
+    action = gain * direction - 0.6 * vel
+    return np.clip(action, -1.0, 1.0).astype(np.float32)
+
+
 def scripted_action(
     obs,
     action_dim: int,
@@ -224,6 +280,8 @@ def scripted_action(
         action = scripted_push_action(obs, action_dim, gain)
     elif controller == "slide":
         action = scripted_slide_action(obs, action_dim, gain)
+    elif controller == "maze":
+        action = scripted_maze_action(obs, action_dim, gain, env)
     else:
         action = scripted_reach_action(obs, action_dim, gain)
     return action.astype(np.float32)
@@ -281,6 +339,21 @@ def collect_episodes(
         episode_idx += 1
 
     return episodes, spec
+
+
+def load_episodes_npz(path) -> list[Episode]:
+    """Load pre-collected trajectories (e.g. from an RL teacher) saved as object
+    arrays of per-episode ``states``/``actions`` — used for tasks with no scripted
+    expert (Adroit) where the data source is a learned teacher, not a controller."""
+    data = np.load(path, allow_pickle=True)
+    states = data["states"]
+    actions = data["actions"]
+    episodes: list[Episode] = []
+    for s, a in zip(states, actions):
+        episodes.append(
+            Episode(states=np.asarray(s, dtype=np.float32), actions=np.asarray(a, dtype=np.float32))
+        )
+    return episodes
 
 
 def fit_normalizer(episodes: Iterable[Episode], eps: float = 1e-6) -> Normalizer:
