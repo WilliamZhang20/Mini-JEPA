@@ -1,22 +1,36 @@
 # JEPA Mini Robotics
 
-Small action-conditioned JEPA experiments for Gymnasium Robotics.
+Small action-conditioned JEPA (Joint-Embedding Predictive Architecture)
+experiments for Gymnasium Robotics. The question: **how far can a compact
+self-supervised latent world model go on real robot-control tasks without
+becoming a giant foundation model?** Every world model here is ≤ ~6 M parameters
+and trains on low-dimensional state.
 
-The goal of this repo is to see how far a compact self-supervised world model can
-go on simple robot control tasks without becoming a giant foundation model. It
-covers three Fetch tasks of increasing difficulty:
+It started as three Fetch tasks and now spans four difficulty tiers, from
+table-top manipulation to long-horizon maze navigation and a 28-DoF dexterous
+hand:
 
-- `FetchReach-v4`: goal-conditioned reaching (solved by pure JEPA + MPC).
-- `FetchPush-v4`: push an object across the table to a goal.
-- `FetchPickAndPlace-v4`: grasp an object and place it at a goal, often mid-air.
+| Tier | Task(s) | Best agent | Success |
+| --- | --- | --- | ---: |
+| base | FetchReach / Push / PickAndPlace | JEPA + learned policy + MPC | 1.00 / 1.00 / 1.00 |
+| 1 | **FetchSlide** (ballistic strike) | JEPA-latent TQC + HER | 0.83 |
+| 2 | **PointMaze** UMaze / Medium / Large | **Hierarchical JEPA** | 1.00 / 0.90 / 1.00 |
+| 2 | **AntMaze** UMaze (8-DoF ant) | Hierarchical JEPA | 0.93 |
+| 3 | **Adroit** Door / Hammer / Pen / Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
 
-For all three we learn a latent dynamics model from low-dimensional robot
-observations and control by planning over it. For the contact-rich manipulation
-tasks we add a small **learned action prior** on top of the JEPA representation
-(see ["A world model is not a controller"](#a-world-model-is-not-a-controller)).
+The repo is deliberately not one monolithic RL agent. It trains a JEPA predictive
+world model and a **goal-conditioned controller in its latent** — by behaviour
+cloning, HER reinforcement learning, or a hierarchical subgoal planner, whichever
+the task demands — and the experiments below map out *which* of those wins where,
+and why. Two findings recur and are documented in
+["What the world model is good for"](#what-the-world-model-is-good-for):
 
-This is deliberately not an RL agent: it trains a JEPA-style predictive model and
-a behaviour-cloned policy, then plans/refines actions at evaluation time.
+1. **JEPA's encoder carries control; its predictor carries planning — but only on
+   smooth dynamics.** Planning through the learned predictor works on smooth tasks
+   (Fetch reach/push, and the *high level* of the maze hierarchy) and *fails* on
+   contact-rich ones (slide, Adroit) due to model exploitation.
+2. **Long-horizon tasks need hierarchy, not a longer flat plan.** A two-level
+   Hierarchical JEPA beats flat goal-conditioned control on every maze tested.
 
 ## What Is Inside
 
@@ -27,16 +41,22 @@ a behaviour-cloned policy, then plans/refines actions at evaluation time.
 - `jepa_robotics/evaluate.py`: compares random actions, a scripted controller,
   the learned policy on its own, and the policy-seeded JEPA+MPC planner. It can
   also record MP4 rollouts.
-- `jepa_robotics/models.py`: the action-conditioned JEPA model (recurrent latent
-  dynamics) and the `GoalConditionedPolicy` action prior.
-- `jepa_robotics/data.py`: trajectory collection, scripted expert policies, and
-  normalization.
-- `jepa_robotics/envs.py`: Gymnasium Robotics registration and observation
-  flattening.
-- `jepa_robotics/tasks.py`: task presets for FetchReach, FetchPush,
-  FetchPickAndPlace, and exploratory Adroit Door support.
-- `scripts/`: Slurm entry points, the end-to-end `train_eval_object_v2.sh`
-  pipeline, expert/agent video recorders, and `check_experts.py`.
+- `jepa_robotics/models/`: the action-conditioned JEPA model (recurrent latent
+  dynamics, optional K-head ensemble) and the `GoalConditionedPolicy` action
+  prior, split into `world_model.py` / `policy.py` / `mlp.py` / `regularizers.py`.
+- `jepa_robotics/scoring/`: per-task MPC cost mixins (`manip`/`strike`/`goal`).
+- `jepa_robotics/data.py`: trajectory collection, scripted experts
+  (reach/push/pick/slide/maze), offline-npz loading, and normalization.
+- `jepa_robotics/envs.py`: Gymnasium Robotics registration, observation
+  flattening, maze/AntMaze goal-env handling.
+- `jepa_robotics/sb3_jepa.py`: SB3 feature extractors that put the JEPA latent
+  under a TQC/SAC policy (HER, trainable-encoder, and concat variants).
+- `jepa_robotics/tasks.py`: task presets for Fetch, FetchSlide, PointMaze,
+  AntMaze, and the Adroit suite.
+- `scripts/`: Slurm entry points, the `train_eval_object_v2.sh` pipeline, the
+  Hierarchical-JEPA evaluator (`eval_hjepa_maze.py`), the offline-demo adapter
+  (`minari_to_npz.py`), world-model accuracy probe (`eval_wm_rollout.py`), and
+  video recorders.
 
 Experiment outputs are intentionally ignored by Git. Checkpoints, videos, logs,
 and JSONL eval files are written under `runs/` by default.
@@ -71,6 +91,120 @@ The payoff (FetchPickAndPlace, 30 episodes): the learned policy alone matches th
 scripted controller, and policy + world-model MPC is slightly *more* precise than
 scripted. See [Results Snapshot](#results-snapshot).
 
+## Beyond Fetch: Tiers 1–3
+
+The same compact-JEPA recipe scales to much harder tasks, each requiring one new
+ingredient on top of the world model.
+
+### Tier 1 — FetchSlide (ballistic strike): 0.83
+
+The gripper is locked and the goal is *out of reach*, so the arm must impart the
+right momentum in a single strike and then watch — there is no post-contact
+correction. Receding-horizon MPC is structurally wrong for this ("commit then
+watch"), and indeed flat CEM planning scored 0.00. The winner is a **TQC + HER
+controller trained on the frozen JEPA latent** (deep-learning control, not
+planning): 0.83 success, up from ~0.60, near the TQC reference ceiling (~0.87).
+FetchSlide is a known-hard ballistic task where even SOTA tops out in the high
+0.8s. (`train_jepa_sb3_policy.py`, demonstration-augmented HER.)
+
+### Tier 2 — Mazes: Hierarchical JEPA
+
+Long mazes break flat goal-conditioned control: a straight-line-to-goal policy
+walks into walls, and the success signal is hundreds of steps away. Flat HER
+plateaus around 0.70 (it reaches *visible* goals but cannot route around walls).
+
+**Hierarchical JEPA (`eval_hjepa_maze.py`)** splits control into two timescales:
+
+- **Low level** — the goal-conditioned policy (HER for PointMaze, HER-relabeled BC
+  for AntMaze) acting on the JEPA latent; it reliably reaches *nearby* subgoals.
+- **High level** — a **data-driven subgoal graph**: landmarks sampled in
+  achieved-goal (x, y) space, with an edge between two landmarks only if the agent
+  *empirically* got from one to the other within *k* steps. Edges therefore only
+  exist where trajectories actually went — i.e. **around** walls. Dijkstra plans a
+  subgoal path; the low level executes one subgoal at a time.
+
+This beats flat on **every** maze with the *same* low level:
+
+| Maze | Flat (low level → goal) | **Hierarchical JEPA** |
+| --- | ---: | ---: |
+| PointMaze UMaze | 0.70 | **1.00** |
+| PointMaze Medium | 0.70 | **0.90** |
+| PointMaze Large | 0.70 | **1.00** |
+| AntMaze UMaze (8-DoF ant) | 0.70 | **0.93** |
+
+The win magnitude is set by the low level's competence (the documented hierarchy
+caveat — the hierarchy cannot reach subgoals the low level cannot). On the bigger
+AntMaze layouts the offline-BC ant walker is the bottleneck, addressed by a
+stronger offline→online TQC+HER low level (`uncap_antmaze_hjepa.slurm`).
+
+### Tier 3 — Adroit dexterous hand (24–30-DoF): the whole suite
+
+The Adroit hand breaks the scripted-expert data engine — there is no simple
+geometric controller for finger coordination, and the observation is flat (no
+goal). From-scratch RL on these sparse-success, contact-rich tasks gets ~0%
+(see findings below). The fix is a **learned data source**: offline D4RL expert
+demonstrations (via [Minari](https://minari.farama.org/)), behaviour-cloned on
+the frozen JEPA latent (`minari_to_npz.py` → `train_policy.py --episodes-npz`).
+
+| Adroit task | from-scratch RL | **JEPA-latent BC on offline demos** |
+| --- | ---: | ---: |
+| Door | 0.00 | **0.96** |
+| Hammer | 0.00 | **1.00** |
+| Pen (in-hand reorientation) | 0.00 | **0.77** |
+| Relocate | 0.00 | **1.00** |
+
+Notably the BC controllers run on the *same* exploratory world model (trained on
+random data). The encoder is information-preserving enough (its state-probe loss
+forces the latent to reconstruct the full state) that BC clones the experts
+cleanly — the random-data latent only blocked RL *exploration*, never imitation.
+
+## What The World Model Is Good For
+
+Across all tiers, a consistent picture of where JEPA's *predictive* learning pays
+off — verified by direct experiment, including several clean negative results.
+
+**1. The encoder (representation) is load-bearing; ablation-verified.** The
+Adroit/maze controllers act on `encode(obs)`, never the raw observation. Replacing
+the trained encoder with a random-init encoder of identical shape collapses Adroit
+Door from 0.90 → 0.00 — the policy genuinely routes through the learned latent and
+is not a raw-observation "cheater".
+
+**2. Planning through the predictor works on smooth dynamics, fails on
+contact-rich ones.** Sampling-based MPC over the JEPA dynamics solves the smooth
+Fetch reach/push tasks and drives the *high level* of the maze hierarchy (abstract
+subgoal transitions are smooth). But on contact-rich tasks it actively *hurts*:
+
+- FetchSlide MPC: 0.00 (the planner exploits world-model error instead of striking).
+- Adroit Pen, BC vs BC+world-model MPC: **0.70 → 0.15** (aggressive planning) or
+  → 0.70 (conservative planning just reproduces BC). An ensemble-disagreement
+  penalty (Roadmap A) did not rescue it.
+
+**3. You cannot "just make the world model more precise" for contact planning.**
+We retrained the Pen world model on the *expert demo manifold* (where the planner
+actually queries) instead of random data. It became a *worse* open-loop predictor
+(rollout error went from ~4× better-than-static to *worse* than static off the
+narrow expert distribution), and MPC still lost to BC. The reason is structural:
+**a world model is only accurate where it was trained, but a planner's whole job
+is to perturb *off* that distribution** to search for improvements — the
+"perturbation frontier" is by definition the un-modeled region. Data-distribution
+matching cannot fix this; it is why contact-rich model-based control is genuinely
+hard, and why the maze *hierarchy* (which plans over smooth, in-distribution
+macro-steps) is the regime where the JEPA predictor finally earns its keep.
+
+This is the central scientific result of the repo: **JEPA's value is its
+representation and — for smooth/abstract dynamics — its predictor; from-scratch
+model-based planning is not a free win on contact-rich control.**
+
+## Roadmap Progress
+
+- **World-model upgrades:** ✅ K-head **ensemble dynamics** with an inter-head
+  disagreement signal (`--ensemble-heads`); ✅ **VICReg** variance+covariance
+  regularization (prevents latent collapse, monitored every run); ✅ better data
+  (HER for slide/maze, **offline D4RL demos** for Adroit/AntMaze).
+- **Hierarchical JEPA:** ✅ demonstrated across PointMaze + AntMaze (above).
+- The code is modular by responsibility (`models/` package, per-task `scoring/`
+  mixins) so these were additive, not rewrites.
+
 ## Setup
 
 Use a Python environment with MuJoCo/Gymnasium Robotics installed. The scripts
@@ -81,7 +215,12 @@ requirements installed should work.
 conda create -n myenv python=3.11 -y
 conda activate myenv
 pip install -r requirements.txt
+# optional, for the offline-demo (Adroit / AntMaze) experiments:
+pip install --no-deps minari h5py portion
 ```
+
+The Tier 2/3 reinforcement-learning controllers also use `stable-baselines3` and
+`sb3-contrib` (TQC).
 
 On headless GPU machines, use EGL:
 
@@ -357,15 +496,37 @@ Outputs are written under `runs/` and ignored by Git.
 - `fetch_pick_place`: grasp and place, often at a mid-air goal. Solved (1.00
   success) with the world model + learned policy + MPC; sampling-only MPC was
   not enough (see ["A world model is not a controller"](#a-world-model-is-not-a-controller)).
-- `adroit_door`: exploratory support for non-goal observation spaces. It needs a
-  task-specific reward or success probe before the Fetch-style goal geometry
-  objective is meaningful.
+- `fetch_slide`: ballistic strike, gripper locked, goal out of reach. Solved
+  (0.83) by a TQC+HER controller on the JEPA latent; flat MPC fails (Tier 1).
+- `point_umaze` / `point_medium` / `point_large`, `antmaze_*`: maze navigation,
+  solved by Hierarchical JEPA (Tier 2). AntMaze env ids must match the Minari
+  D4RL dataset they were recorded with (`AntMaze_*_Diverse_GR-v4`).
+- `adroit_door` / `adroit_hammer` / `adroit_pen` / `adroit_relocate`: 24–30-DoF
+  dexterous hand, flat non-goal observation. Solved by behaviour cloning offline
+  D4RL demos on the JEPA latent (Tier 3); from-scratch RL gets ~0%.
+
+### Offline demos (Adroit / AntMaze)
+
+Tier 3 and the AntMaze low levels use offline D4RL datasets via Minari:
+
+```bash
+pip install --no-deps minari h5py portion   # keep gymnasium/numpy pinned
+export MINARI_DATASETS_PATH=$PWD/.cache/minari
+python scripts/minari_to_npz.py --dataset D4RL/door/expert-v2 \
+  --out runs/adroit_door/data/door_expert_demos.npz
+python -m jepa_robotics.train_policy --task adroit_door \
+  --model-path <jepa_wm>.pt --episodes-npz runs/adroit_door/data/door_expert_demos.npz \
+  --train-steps 30000 --out runs/adroit_door/checkpoints/door_bc.pt
+```
 
 ## Current Limitations
 
 - This is low-dimensional state JEPA, not pixel JEPA.
-- The MPC refinement runs online, so the policy + MPC agent is slower than the
-  feed-forward policy alone (which already matches the scripted controller).
-- The learned policy is behaviour-cloned from the scripted experts, so it
-  inherits their behaviour; the world model contributes the latent representation
-  it runs on and the MPC refinement on top.
+- **Model-based planning does not help contact-rich control** (slide, Adroit) — it
+  exploits world-model error; those tasks are solved by learned control (BC/HER) on
+  the JEPA latent, not by planning. See
+  [What the world model is good for](#what-the-world-model-is-good-for).
+- Hierarchical JEPA's ceiling is the low-level controller's competence; weak
+  locomotion (offline-BC ant) caps the harder AntMaze layouts.
+- The MPC refinement (where it helps) runs online, so policy + MPC is slower than
+  the feed-forward policy alone.

@@ -75,6 +75,43 @@ def seed_demo_episodes(model, env_id, max_steps, controller, action_dim, n_episo
           f'"replay_size": {rb.size()}}}', flush=True)
 
 
+def seed_demo_episodes_npz(model, env_id, spec, npz_path, n_episodes, seed):
+    """Inject OFFLINE demo transitions (npz of flattened states+actions) directly
+    into the HER replay buffer, computing the sparse goal reward via the env's
+    ``compute_reward``. For tasks with no scripted expert (AntMaze) — gives the
+    online TQC+HER low-level a strong head start from D4RL demonstrations."""
+    import numpy as np
+    from jepa_robotics.data import load_episodes_npz
+
+    vec = model.get_env()
+    rb = model.replay_buffer
+    compute_reward = vec.envs[0].unwrapped.compute_reward
+    gs, ge = spec.obs_dim, spec.obs_dim + spec.goal_dim
+    ds, de = spec.obs_dim + spec.goal_dim, spec.obs_dim + 2 * spec.goal_dim
+    episodes = load_episodes_npz(npz_path)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(episodes)
+
+    def to_dict(s):
+        return {"observation": s[None, :gs].astype(np.float32),
+                "achieved_goal": s[None, gs:ge].astype(np.float32),
+                "desired_goal": s[None, ds:de].astype(np.float32)}
+
+    n_added = 0
+    for ep in episodes[:n_episodes]:
+        S, A = ep.states, ep.actions
+        for t in range(len(A)):
+            obs = to_dict(S[t]); nxt = to_dict(S[t + 1])
+            r = float(compute_reward(nxt["achieved_goal"][0], obs["desired_goal"][0], {}))
+            success = r >= 1.0  # AntMaze sparse reward: 1 at goal, 0 elsewhere
+            done = np.array([t == len(A) - 1 or success])
+            info = [{"is_success": float(success)}]
+            rb.add(obs, nxt, A[t][None, :].astype(np.float32), np.array([r]), done, info)
+            n_added += 1
+    print(f'{{"event": "seeded_demos_npz", "episodes": {min(n_episodes, len(episodes))}, '
+          f'"transitions": {n_added}, "replay_size": {rb.size()}}}', flush=True)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="fetch_slide")
@@ -100,6 +137,10 @@ def main() -> None:
                         "learning (demonstration-augmented HER). HER relabels failed strikes too, so "
                         "even sub-optimal demos densify the sparse strike-credit signal.")
     p.add_argument("--demo-gain", type=float, default=12.0)
+    p.add_argument("--demo-npz", type=Path, default=None,
+                   help="Seed the HER replay buffer with OFFLINE demo transitions from this npz "
+                        "(flattened states+actions; reward via env.compute_reward). For AntMaze etc.")
+    p.add_argument("--demo-npz-episodes", type=int, default=800)
     p.add_argument("--save-replay-buffer", action="store_true")
     p.add_argument(
         "--replay-checkpoint-freq",
@@ -312,6 +353,12 @@ def main() -> None:
         seed_demo_episodes(
             model, env_id, max_steps, task.controller, env.action_space.shape[0],
             args.demo_episodes, args.demo_gain, args.seed + 777,
+        )
+    if args.demo_npz is not None:
+        from jepa_robotics.envs import obs_spec_from_env
+        seed_demo_episodes_npz(
+            model, env_id, obs_spec_from_env(env), args.demo_npz,
+            args.demo_npz_episodes, args.seed + 778,
         )
     t0 = time.time()
     model.learn(

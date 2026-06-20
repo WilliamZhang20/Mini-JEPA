@@ -5,16 +5,25 @@ control (MPC)** for Gymnasium-Robotics manipulation. The world model is a *predi
 controller: the BC policy proposes actions and the world-model MPC refines them.
 
 ## Repo map
-- `jepa_robotics/models.py` — `ActionConditionedJEPA` (encoder + EMA target + `direct`/`rollout`/`recurrent`
-  predictor + `state_probe` + `distance_probe`), `GoalConditionedPolicy`.
-- `jepa_robotics/train.py` — world-model training (multi-horizon normalized-MSE JEPA loss + probes + regularizers).
-- `jepa_robotics/train_policy.py` — behaviour cloning of the policy on the **frozen** JEPA latent.
-- `jepa_robotics/evaluate.py` — `JEPAMPCPolicy` (random/CEM/grad planning; `latent`/`state`/`combined`/`manip` scoring),
-  plus Random/Scripted/SB3/LearnedPolicyOnly baselines.
-- `jepa_robotics/data.py` — episode collection, scripted experts (`reach`/`push`/`pick_place`), `Normalizer`.
-- `jepa_robotics/envs.py` — `make_env`, `ObsSpec`, `flatten_obs` = concat[observation, achieved_goal, desired_goal].
-- `jepa_robotics/tasks.py` — `TASKS` dict.
-- `scripts/train_eval_object_v2.sh` — end-to-end: train WM → train policy → eval.
+- `jepa_robotics/models/` — package: `world_model.py` (`ActionConditionedJEPA`: encoder + EMA target +
+  `direct`/`rollout`/`recurrent` predictor + **K-head ensemble** + `state_probe`/`distance_probe`),
+  `policy.py` (`GoalConditionedPolicy`), `mlp.py`, `regularizers.py` (VICReg variance+covariance, normalized-MSE).
+- `jepa_robotics/scoring/` — per-task MPC score mixins (`manip`/`strike`/`goal`/`common`) composed into `JEPAMPCPolicy`.
+- `jepa_robotics/train.py` — WM training (multi-horizon JEPA loss + probes + VICReg; `--ensemble-heads`,
+  `--episodes-npz` for offline data, non-goal-env support).
+- `jepa_robotics/train_policy.py` — BC of the policy on the **frozen** JEPA latent (`--episodes-npz`, `--her-relabel-frac`).
+- `jepa_robotics/evaluate.py` — `JEPAMPCPolicy` (random/CEM/grad; `latent`/`state`/`combined`/`manip`/`strike`,
+  `--open-loop`/`--replan-window`) + Random/Scripted/SB3/LearnedPolicyOnly baselines.
+- `jepa_robotics/data.py` — episode collection, scripted experts (`reach`/`push`/`pick_place`/`slide`/`maze`),
+  `load_episodes_npz`, `Normalizer`.
+- `jepa_robotics/envs.py` — `make_env` (Maze success→is_success alias, AntMaze continuing-task off), `ObsSpec`, `flatten_obs`.
+- `jepa_robotics/sb3_jepa.py` — `JEPALatentExtractor` (HER on latent), `JEPAEncoderExtractor`/`JEPAConcatExtractor`
+  (trainable encoder), `JEPALatentObsWrapper`.
+- `jepa_robotics/tasks.py` — `TASKS` dict (Fetch / slide / PointMaze / AntMaze / Adroit).
+- Key scripts: `train_jepa_sb3_policy.py` (TQC+HER on latent; `--demo-npz` offline seeding),
+  `train_adroit_*.py` (teacher / reward-head / controller), `minari_to_npz.py` (D4RL→Episode npz),
+  `eval_hjepa_maze.py` (Hierarchical-JEPA subgoal graph), `eval_wm_rollout.py` (WM accuracy probe),
+  `train_eval_antmaze_hjepa.slurm` / `uncap_antmaze_hjepa.slurm`.
 
 ## Environment / run notes
 - Conda env `myenv`; `MUJOCO_GL=egl`; H200 GPU (`--device cuda`). `gymnasium-robotics>=1.2`, action space is
@@ -22,14 +31,23 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 - Per-task obs widths differ: **FetchReach** `observation`=10 → `state_dim`=16; **Push/PickPlace/Slide**
   `observation`=25 → `state_dim`=31. This mismatch is the central obstacle for a unified model (see below).
 
-## Status (success rate, mean final distance)
-| Task | Best agent | Success | Dist |
-|------|-----------|---------|------|
-| FetchReach-v4 | JEPA+MPC (grad, state) | 95–100% | 0.02 |
-| FetchPush-v4 | JEPA policy + CEM (policy60) | 100% | 0.014 |
-| FetchPickAndPlace-v4 | JEPA policy + CEM (manip) | **40–100%** | 0.01–0.24 |
+## Status (best success rate per task)
+| Tier | Task | Best agent | Success |
+|------|------|-----------|---------|
+| base | FetchReach-v4 | JEPA+MPC (grad, state) | 95–100% |
+| base | FetchPush-v4 | JEPA policy + CEM | 100% |
+| base | FetchPickAndPlace-v4 | JEPA policy + CEM (manip) | 100% |
+| 1 | FetchSlide-v4 | JEPA-latent TQC+HER | 0.83 |
+| 2 | PointMaze U/Med/Large | **H-JEPA** (subgoal graph) | 1.00 / 0.90 / 1.00 |
+| 2 | AntMaze UMaze | H-JEPA (BC low-level) | 0.93 |
+| 2 | AntMaze Medium/Large | H-JEPA (uncapping low-level) | in progress |
+| 3 | Adroit Door/Hammer/Pen/Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
 
-**PickAndPlace is the weak spot** (grasp is the bottleneck) and drives the world-model roadmap below.
+Tiers 1–3 essentially cleared. The two recurring lessons (see roadmaps + README):
+**(a)** JEPA's *encoder/representation* is what carries control (BC/RL act in the latent); its
+*predictor* only pays off for planning on **smooth** dynamics (Fetch reach/push, H-JEPA high level),
+not contact-rich (slide/Adroit → model exploitation). **(b)** Long-horizon mazes need **hierarchy**
+(H-JEPA), not flat MPC/HER.
 
 ---
 
@@ -181,14 +199,30 @@ training the high level.
 
 ---
 
-# Active work — FetchSlide (Tier 1)
+# Realized roadmap progress
 
-In progress: first task beyond the reach/push/pick triad. FetchSlide locks the gripper (`block_gripper=True`)
-and places the goal **out of reach** via `target_offset=[0.4,0,0]` — a ballistic *strike* task with no
-post-contact correction. Architecture beef-up for it: deeper recurrent dynamics (stacked residual transition
-blocks, `--transition-depth`) + extended horizons to capture coasting + a scripted `slide` striking expert.
-Task entry `fetch_slide` in `tasks.py`; video resolution is now configurable via `--width/--height` on
-`record_jepa.py` (env default is 480×480).
+- **Roadmap A:** ✅ ensemble dynamics + disagreement (`--ensemble-heads`), ✅ VICReg covariance, ✅ better
+  data (HER for slide/maze, **offline D4RL demos** for Adroit/AntMaze via `minari_to_npz.py`).
+  Not pursued: grasp head (pick already solved), stochastic/RSSM latent (would be the Tier-5 prereq),
+  scheduled sampling.
+- **Roadmap C (Hierarchical JEPA):** ✅ demonstrated — `eval_hjepa_maze.py` beats flat on every maze
+  (PointMaze 1.0/0.9/1.0, AntMaze UMaze 0.93). High level = data-driven **subgoal graph** (landmarks +
+  empirical k-step reachability → routes around walls) + Dijkstra; low level = goal-conditioned HER/BC policy.
+- **Roadmap B (unified Fetch controller):** not attempted.
+
+# Active work — AntMaze Medium/Large (Tier 2 tail)
+
+H-JEPA's win is capped by **low-level competence** (the documented caveat). AntMaze Medium/Large are
+locomotion-limited (offline-BC ant walker is weak: flat ≈ 0.03–0.07). Uncapping with a stronger
+**TQC+HER low-level seeded from offline D4RL transitions** (`uncap_antmaze_hjepa.slurm`,
+`train_jepa_sb3_policy.py --demo-npz`). Then re-run flat-vs-H-JEPA. Next tier after this: FrankaKitchen
+(Tier 4) = H-JEPA over *skill* subgoals, reusing the maze hierarchy machinery.
+
+# Infra note
+GPU control node `watgpu208` has a broken SLURM GPU cgroup (`/dev/nvidia-uvm` PermissionError → `cuInit`
+fails though `nvidia-smi` works); **route GPU work through `sbatch`**, not the interactive node. Offline
+demos need `pip install --no-deps minari h5py portion` (keeps gymnasium 1.2.3 / numpy 1.26.4);
+`MINARI_DATASETS_PATH=<repo>/.cache/minari`.
 
 ---
-*Conventions: run from repo root inside conda `myenv`; checkpoints/logs/eval land under `runs/<task>/`.*
+*Conventions: run from repo root inside conda `myenv` with `PYTHONNOUSERSITE=1 MUJOCO_GL=egl`; checkpoints/logs/eval land under `runs/<task>/`.*
