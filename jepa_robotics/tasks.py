@@ -147,6 +147,17 @@ TASKS = {
         max_episode_steps=1000,
         horizons="1,2,4,8,16,32",
     ),
+    # Tier 4 — FrankaKitchen: 9-DoF arm, compositional sequential subtasks
+    # (microwave/kettle/burner/switch). Flat 59-D obs (goal is a fixed task set,
+    # not a coordinate); no scripted expert -> offline D4RL demos + BC on latent.
+    "franka_kitchen": TaskConfig(
+        name="franka_kitchen",
+        env_id="FrankaKitchen-v1",
+        slug="franka_kitchen",
+        controller="none",
+        max_episode_steps=280,
+        horizons="1,2,4,8,16",
+    ),
 }
 
 

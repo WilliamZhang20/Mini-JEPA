@@ -619,6 +619,7 @@ def load_jepa_artifact(path: Path, device: torch.device):
         ensemble_heads=int(config.get("ensemble_heads", 1)),
         residual_prediction=bool(config.get("residual_prediction", False)),
         transition_depth=int(config.get("transition_depth", 1)),
+        inverse_dynamics=bool(config.get("inverse_dynamics", False)),
     ).to(device)
     state_dict = _remap_legacy_state_dict(
         artifact["model"], str(config.get("predictor_mode", "direct"))

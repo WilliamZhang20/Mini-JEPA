@@ -48,7 +48,10 @@ def main() -> None:
     ds = minari.load_dataset(args.dataset)
     obs_list, rew_list = [], []
     for i, ep in enumerate(ds.iterate_episodes()):
-        o = np.asarray(ep.observations, dtype=np.float32)[:-1]  # align with rewards
+        obs_raw = ep.observations
+        if isinstance(obs_raw, dict):  # kitchen-style dict obs -> keep the flat observation
+            obs_raw = obs_raw["observation"]
+        o = np.asarray(obs_raw, dtype=np.float32)[:-1]  # align with rewards
         r = np.asarray(ep.rewards, dtype=np.float32)
         n = min(len(o), len(r))
         obs_list.append(o[:n]); rew_list.append(r[:n])

@@ -23,6 +23,7 @@ class ActionConditionedJEPA(nn.Module):
         residual_prediction: bool = False,
         transition_depth: int = 1,
         ensemble_heads: int = 1,
+        inverse_dynamics: bool = False,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
@@ -85,6 +86,14 @@ class ActionConditionedJEPA(nn.Module):
         # object positions) is what the manipulation-aware planner relies on.
         self.state_probe = MLP([latent_dim, hidden_dim, hidden_dim, state_dim], layer_norm=True)
         self.distance_probe = MLP([latent_dim, hidden_dim, 1])
+        # Inverse-dynamics head a_t = g(z_t, z_{t+1}): predicting the action from a
+        # latent transition forces the encoder to RETAIN the fine, control-relevant
+        # (action-discriminative) detail that VICReg/prediction smoothing otherwise
+        # discards — making the latent useful for contact-rich manipulation control,
+        # not just abstract/navigation tasks.
+        self.inverse_dynamics = inverse_dynamics
+        if inverse_dynamics:
+            self.inverse_head = MLP([2 * latent_dim, hidden_dim, hidden_dim, action_dim], layer_norm=True)
         self.reset_target()
 
     def reset_target(self) -> None:

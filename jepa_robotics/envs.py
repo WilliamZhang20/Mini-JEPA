@@ -58,6 +58,11 @@ def make_env(
     if "PointMaze" in env_id or "AntMaze" in env_id:
         kwargs.setdefault("continuing_task", False)
         kwargs.setdefault("reset_target", False)
+    # FrankaKitchen's default goal is all 7 possible subtasks; the D4RL demos
+    # target a fixed 4-task set, so pin the eval goal to match the data.
+    if "Kitchen" in env_id:
+        kwargs.setdefault("tasks_to_complete",
+                          ["microwave", "kettle", "bottom burner", "light switch"])
     env = gym.make(env_id, **kwargs)
     # Maze and Adroit envs report ``info["success"]``; the rest of the pipeline
     # (HER EvalCallback, eval scripts) reads ``info["is_success"]``. Alias it.
@@ -65,9 +70,53 @@ def make_env(
     # ``is_success`` is not), so it is safe to apply broadly.
     if "Maze" in env_id or "Adroit" in env_id:
         env = SuccessAliasWrapper(env)
+    # FrankaKitchen has a Dict obs whose achieved/desired goals are nested Dicts
+    # (per-task target maps, not coordinates). Treat it as a flat non-goal env:
+    # expose only the 59-D ``observation`` and surface task-completion as success.
+    if "Kitchen" in env_id:
+        env = KitchenFlattenWrapper(env)
     if seed is not None:
         env.action_space.seed(seed)
     return env
+
+
+def _make_kitchen_wrapper():
+    import gymnasium as gym
+    from gymnasium import spaces
+
+    class _KitchenFlatten(gym.ObservationWrapper):
+        """Expose FrankaKitchen as a flat 59-D observation env and report
+        ``info['is_success']`` = (all required subtasks completed this episode)."""
+
+        def __init__(self, env):
+            super().__init__(env)
+            self.observation_space = env.observation_space["observation"]
+            # Tasks required this episode are fixed at reset (the env pops them
+            # from tasks_to_complete as they complete, so snapshot the goal set).
+            self._goal_tasks = list(getattr(env.unwrapped, "tasks_to_complete", []) or [])
+            self._n_tasks = len(self._goal_tasks) or 4
+            self._done_tasks: set = set()
+
+        def observation(self, obs):
+            return np.asarray(obs["observation"], dtype=np.float32)
+
+        def reset(self, **kwargs):
+            self._done_tasks = set()
+            obs, info = self.env.reset(**kwargs)
+            return self.observation(obs), info
+
+        def step(self, action):
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            self._done_tasks |= set(info.get("step_task_completions", []))
+            n_req = len(info.get("tasks_to_complete", [])) + len(self._done_tasks)
+            info["tasks_done"] = len(self._done_tasks)
+            info["is_success"] = float(len(self._done_tasks) >= max(1, self._n_tasks))
+            return self.observation(obs), reward, terminated, truncated, info
+
+    return _KitchenFlatten
+
+
+KitchenFlattenWrapper = _make_kitchen_wrapper()
 
 
 def _make_success_alias_wrapper():

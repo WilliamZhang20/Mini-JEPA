@@ -109,6 +109,15 @@ def compute_loss(
     else:
         loss_achieved = torch.zeros((), dtype=state.dtype, device=device)
 
+    # Inverse dynamics: predict a_t from (z_t, z_{t+1}) through the ONLINE encoder so
+    # gradients pressure the encoder to keep action-discriminative (control) detail.
+    if getattr(model, "inverse_dynamics", False):
+        z_next = model.encode(future_states[:, 0])
+        inv_pred = model.inverse_head(torch.cat([z, z_next], dim=-1))
+        loss_inverse = F.mse_loss(inv_pred, actions[:, 0])
+    else:
+        loss_inverse = torch.zeros((), dtype=state.dtype, device=device)
+
     latent_goal_distance = 1.0 - F.cosine_similarity(z, goal_z, dim=-1, eps=1e-6)
     physical_goal_distance = distance.squeeze(-1)
     if physical_goal_distance.max() > 1e-6:
@@ -127,6 +136,7 @@ def compute_loss(
         + weights["pred_achieved"] * loss_pred_achieved
         + weights["pred_goal"] * loss_pred_goal
         + weights["pred_cov"] * loss_pred_cov
+        + weights.get("inverse", 0.0) * loss_inverse
     )
     metrics = {
         "loss": float(total.detach().cpu()),
@@ -141,6 +151,7 @@ def compute_loss(
         "pred_achieved": float(loss_pred_achieved.detach().cpu()),
         "pred_goal": float(loss_pred_goal.detach().cpu()),
         "pred_cov": float(loss_pred_cov.detach().cpu()),
+        "inverse": float(loss_inverse.detach().cpu()),
     }
     if getattr(model, "ensemble_heads", 1) > 1:
         with torch.no_grad():
@@ -238,6 +249,7 @@ def save_model_artifact(path: Path, model, normalizer, spec, args) -> None:
                 "residual_prediction": args.residual_prediction,
                 "transition_depth": args.transition_depth,
                 "ensemble_heads": args.ensemble_heads,
+                "inverse_dynamics": args.inverse_dynamics,
             },
         },
         path,
@@ -300,6 +312,9 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda-pred-achieved", type=float, default=0.0)
     parser.add_argument("--lambda-pred-goal", type=float, default=0.1)
     parser.add_argument("--lambda-pred-cov", type=float, default=0.0)
+    parser.add_argument("--inverse-dynamics", action="store_true",
+                        help="add an inverse-dynamics head (a_t from z_t,z_{t+1}) to make the encoder control-aware")
+    parser.add_argument("--lambda-inverse", type=float, default=0.0)
     parser.add_argument("--eval-episodes", type=int, default=3)
     parser.add_argument("--mpc-candidates", type=int, default=128)
     parser.add_argument("--mpc-horizon", type=int, default=8)
@@ -421,6 +436,7 @@ def main() -> None:
         residual_prediction=args.residual_prediction,
         transition_depth=args.transition_depth,
         ensemble_heads=args.ensemble_heads,
+        inverse_dynamics=args.inverse_dynamics,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     if resume_artifact is not None:
@@ -449,6 +465,7 @@ def main() -> None:
         "pred_achieved": args.lambda_pred_achieved,
         "pred_goal": args.lambda_pred_goal,
         "pred_cov": args.lambda_pred_cov,
+        "inverse": args.lambda_inverse,
     }
 
     step = 0
