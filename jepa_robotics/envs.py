@@ -61,8 +61,11 @@ def make_env(
     # FrankaKitchen's default goal is all 7 possible subtasks; the D4RL demos
     # target a fixed 4-task set, so pin the eval goal to match the data.
     if "Kitchen" in env_id:
+        # Standard D4RL kitchen target set = the 4 tasks the complete-v2 demos
+        # actually finish (microwave/kettle/light switch/slide cabinet); NOT bottom
+        # burner (no demo completes it), which made full-4 near-impossible.
         kwargs.setdefault("tasks_to_complete",
-                          ["microwave", "kettle", "bottom burner", "light switch"])
+                          ["microwave", "kettle", "light switch", "slide cabinet"])
     env = gym.make(env_id, **kwargs)
     # Maze and Adroit envs report ``info["success"]``; the rest of the pipeline
     # (HER EvalCallback, eval scripts) reads ``info["is_success"]``. Alias it.
