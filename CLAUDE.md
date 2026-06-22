@@ -42,12 +42,17 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 | 2 | AntMaze UMaze | H-JEPA (BC low-level) | 0.93 |
 | 2 | AntMaze Medium/Large | H-JEPA (uncapping low-level) | in progress |
 | 3 | Adroit Door/Hammer/Pen/Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
+| 4 | FrankaKitchen-v1 | **control-aware-JEPA skill-hierarchy + DAgger** | **0.68 full-4** (3.36/4 tasks, 0.84 norm) |
 
-Tiers 1–3 essentially cleared. The two recurring lessons (see roadmaps + README):
-**(a)** JEPA's *encoder/representation* is what carries control (BC/RL act in the latent); its
+Tiers 1–4 essentially cleared. The three recurring lessons (see roadmaps + README):
+**(a)** JEPA's *encoder/representation* is what carries control (BC/RL/diffusion act in the latent); its
 *predictor* only pays off for planning on **smooth** dynamics (Fetch reach/push, H-JEPA high level),
-not contact-rich (slide/Adroit → model exploitation). **(b)** Long-horizon mazes need **hierarchy**
-(H-JEPA), not flat MPC/HER.
+not contact-rich (slide/Adroit/kitchen → model exploitation, predictor worse-than-no-op). **(b)** Long-horizon
+mazes/kitchen need **hierarchy** (H-JEPA subgoal graph; subtask skill-hierarchy), not flat MPC/HER.
+**(c)** Contact-rich long-horizon manipulation (kitchen) needs: an *inverse-dynamics control-aware* encoder
+(plain VICReg/predictive latent sheds contact precision — trails raw obs), an *action-chunked flow/diffusion*
+policy (per-step BC compounds error + averages multimodal demos to mush), and *self-imitation/DAgger* to
+bootstrap scarce full-sequence data.
 
 ---
 
@@ -83,12 +88,23 @@ hand). `AdroitHandDoor-v1` is already stubbed in `tasks.py` (`controller="none"`
 *Needs:* a learned (not scripted) data source — offline RL datasets or an RL teacher — plus a stochastic
 world model to handle contact noise.
 
-### Tier 4 — FrankaKitchen-v1
-9-DoF arm in a kitchen with **compositional, sequential sub-tasks** (open microwave, move kettle, flip switch,
-slide cabinet…). **Harder because** it is *long-horizon and multi-task at once*: success = completing an
-ordered set of sub-goals, demanding task decomposition and a skill scheduler, not a single goal-reach.
-*Needs:* hierarchical control (a high-level sub-goal/skill selector over our flat goal-conditioned policy) and
-a world model that stays accurate across very long rollouts.
+### Tier 4 — FrankaKitchen-v1  ✅ **SOLVED at SOTA (0.68 full-4, 3.36/4 tasks), fully JEPA-based**
+9-DoF arm, **compositional sequential sub-tasks** (microwave/kettle/light switch/slide cabinet — the standard
+D4RL complete-v2 set). The hardest tier we've cleared, and it needed the full upgraded stack. Every *flat*
+controller (BC/TD3+BC/IQL/CEM-MPC/latent-Dreamer) scored **0** — chaining, not single-step control, is the wall;
+the JEPA *predictor* was even worse-than-no-op here (contact-rich → model exploitation). **The winning recipe:**
+(1) **control-aware JEPA encoder** — add an *inverse-dynamics head* (`--inverse-dynamics`, predict aₜ from zₜ,zₜ₊₁)
+so the latent keeps contact-relevant detail the plain VICReg/predictive encoder smooths away (lifts JEPA from
+trailing-raw 1.37 → tying-raw 1.86); (2) **action-chunked flow-matching policy** on `[raw ⊕ JEPA latent]`
+(`scripts/train_diffusion_policy.py --objective flow --concat-raw`) — chunking kills per-step compounding error,
+flow/denoising models the multimodal demos instead of averaging to mush (flow ≈ diffusion at ~10× cheaper
+sampling); (3) **subtask skill-hierarchy** — label demos by subtask via env-replay
+(`scripts/label_kitchen_subtasks.py`), condition the flow skill on a target one-hot (`--subtask-cond`), drive it
+with a trivial next-incomplete-subtask scheduler in `eval_diffusion_policy.py` → each subtask is a fresh
+short-horizon problem (0→2.56/4, full-4 0.28); (4) **self-imitation / DAgger** — harvest the policy's own full-4
+successes (`eval_diffusion_policy.py --collect-out`), augment the scarce 19 expert demos to 500+, retrain
+(full-4 0.28→0.57→0.68 over two rounds). *Best policy* `runs/franka_kitchen/checkpoints/kitchen_flow_skill_v5.pt`;
+*video* `runs/franka_kitchen/videos/kitchen_jepa_skill_hierarchy.mp4`. SLURM: `scripts/kitchen_hierarchy.slurm`.
 
 ### Tier 5 — Shadow Dexterous Hand in-hand manipulation  *(ultimate)*
 `HandReach` (warm-up, 20-DoF reach) → `HandManipulateBlock` → `HandManipulateEgg` → `HandManipulatePen`,
@@ -210,13 +226,14 @@ training the high level.
   empirical k-step reachability → routes around walls) + Dijkstra; low level = goal-conditioned HER/BC policy.
 - **Roadmap B (unified Fetch controller):** not attempted.
 
-# Active work — AntMaze Medium/Large (Tier 2 tail)
+# Active work — Tier 5 (ShadowHand) is the remaining frontier
 
-H-JEPA's win is capped by **low-level competence** (the documented caveat). AntMaze Medium/Large are
-locomotion-limited (offline-BC ant walker is weak: flat ≈ 0.03–0.07). Uncapping with a stronger
-**TQC+HER low-level seeded from offline D4RL transitions** (`uncap_antmaze_hjepa.slurm`,
-`train_jepa_sb3_policy.py --demo-npz`). Then re-run flat-vs-H-JEPA. Next tier after this: FrankaKitchen
-(Tier 4) = H-JEPA over *skill* subgoals, reusing the maze hierarchy machinery.
+Tiers 1–4 are cleared (Kitchen Tier-4 solved at SOTA — see above). The Kitchen recipe (control-aware encoder
++ action-chunked flow policy + subtask skill-hierarchy + DAgger self-imitation) is the template for the
+remaining contact-rich tiers. **Tier 5 (Shadow Dexterous Hand in-hand manipulation)** is the ultimate target:
+20-DoF, near-chaotic contact, SO(3) rotation goals — needs the upgraded stack plus an SO(3)-aware goal metric
+and likely a stochastic/RSSM latent. Loose ends: AntMaze Medium/Large remain locomotion-capped (~0.25–0.30,
+the offline-BC ant walker is weak; genuinely hard offline benchmarks where 1.0 isn't realistic).
 
 # Infra note
 GPU control node `watgpu208` has a broken SLURM GPU cgroup (`/dev/nvidia-uvm` PermissionError → `cuInit`

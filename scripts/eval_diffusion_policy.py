@@ -68,6 +68,10 @@ def main() -> None:
     p.add_argument("--subtask-timeout", type=int, default=0,
                    help="scheduler: if a target subtask isn't done within this many steps, rotate to the next "
                         "incomplete one (breaks the stuck-at-2 dead-end). 0 = no rotation.")
+    p.add_argument("--collect-out", type=Path, default=None,
+                   help="self-imitation: save rollouts reaching >= --collect-min-tasks as a labeled npz "
+                        "(states, actions, target one-hot) to augment the scarce full-sequence training data")
+    p.add_argument("--collect-min-tasks", type=int, default=4)
     p.add_argument("--use-ema", action="store_true", default=True)
     p.add_argument("--video-out", type=Path, default=None, help="record an mp4 of the policy")
     p.add_argument("--video-episodes", type=int, default=6)
@@ -133,6 +137,7 @@ def main() -> None:
 
     from collections import deque
     tasks = []
+    col_S, col_A, col_T = [], [], []   # self-imitation collection
     for ep in range(args.episodes):
         env = make_env(task.env_id, seed=args.seed + ep, max_episode_steps=task.max_episode_steps)
         low, high = env.action_space.low, env.action_space.high
@@ -141,20 +146,33 @@ def main() -> None:
         z = encode(obs, progress, target)
         hist = deque([z] * HH, maxlen=HH)             # consecutive latent history
         term = trunc = False; info = {}; step_i = 0; chunk = None; j = 0
+        ep_S = [flatten_obs(obs).copy()]; ep_A = []; ep_T = []
         while not (term or trunc):
             if step_i % args.exec_k == 0:
                 cond = torch.cat(list(hist), dim=-1)  # [1, HH*L]
                 chunk = sample_chunk(net, ddpm, cond, chunk_dim, dev, objective, cfg_weight=args.cfg_weight)[0].cpu().numpy().reshape(H, A_dim)
                 j = 0
             a = np.clip(chunk[min(j, H - 1)], low, high).astype(np.float32)
+            ep_A.append(a.copy()); ep_T.append(target)   # action + the subtask it pursued
             obs, _, term, trunc, info = env.step(a)
+            ep_S.append(flatten_obs(obs).copy())
             done_tasks |= set(info.get("step_task_completions", []))
             target = sched.update(done_tasks)          # scheduler (with optional stall-rotation)
             progress = float(info.get("tasks_done", 0)) / 4.0
             hist.append(encode(obs, progress, target))
             step_i += 1; j += 1
-        tasks.append(int(info.get("tasks_done", 0)))
+        nt = int(info.get("tasks_done", 0))
+        tasks.append(nt)
+        if args.collect_out is not None and nt >= args.collect_min_tasks and len(ep_A) > 16:
+            oh = np.zeros((len(ep_A), 4), np.float32); oh[np.arange(len(ep_A)), ep_T] = 1.0
+            col_S.append(np.asarray(ep_S, np.float32)); col_A.append(np.asarray(ep_A, np.float32)); col_T.append(oh)
         env.close()
+    if args.collect_out is not None:
+        args.collect_out.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(args.collect_out, states=np.array(col_S, dtype=object),
+                 actions=np.array(col_A, dtype=object), targets=np.array(col_T, dtype=object))
+        print(f'{{"event": "collected", "out": "{args.collect_out}", "kept_episodes": {len(col_S)}, '
+              f'"of": {args.episodes}, "min_tasks": {args.collect_min_tasks}}}', flush=True)
     tasks = np.array(tasks)
     print(f"RESULT diffusion-policy(exec_k={args.exec_k}) mean_tasks={tasks.mean():.2f}/4 "
           f"full4={np.mean(tasks >= 4):.2f} >=1={np.mean(tasks >= 1):.2f} "

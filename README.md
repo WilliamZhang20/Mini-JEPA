@@ -17,6 +17,7 @@ hand:
 | 2 | **PointMaze** UMaze / Medium / Large | **Hierarchical JEPA** | 1.00 / 0.90 / 1.00 |
 | 2 | **AntMaze** UMaze (8-DoF ant) | Hierarchical JEPA | 0.93 |
 | 3 | **Adroit** Door / Hammer / Pen / Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
+| 4 | **FrankaKitchen** (4 sequential sub-tasks) | control-aware-JEPA skill-hierarchy + DAgger | **0.68 full-4** (3.36/4, 0.84 norm) |
 
 The repo is deliberately not one monolithic RL agent. It trains a JEPA predictive
 world model and a **goal-conditioned controller in its latent** — by behaviour
@@ -157,6 +158,38 @@ Notably the BC controllers run on the *same* exploratory world model (trained on
 random data). The encoder is information-preserving enough (its state-probe loss
 forces the latent to reconstruct the full state) that BC clones the experts
 cleanly — the random-data latent only blocked RL *exploration*, never imitation.
+
+### Tier 4 — FrankaKitchen (4 compositional sub-tasks): 0.68 full-success, SOTA
+
+The hardest tier cleared, and it needed the whole upgraded stack. A 9-DoF arm must
+complete an *ordered set* of 4 kitchen sub-tasks (microwave, kettle, light switch,
+slide cabinet). **Every flat controller scored 0** — BC, TD3+BC, IQL, CEM-MPC, and a
+latent Dreamer all fail, because the wall is *chaining*, not single-step control (the
+JEPA *predictor* is even worse-than-no-op here: contact-rich → model exploitation).
+Four ingredients, each earned by diagnosis, take it from 0 to SOTA:
+
+| step | what | full-4 |
+| --- | --- | ---: |
+| flat (BC / TD3+BC / IQL / MPC / Dreamer) | single-step control on the latent | 0.00 |
+| **control-aware encoder** + **action-chunked flow** policy | inverse-dynamics head keeps contact detail; chunked flow on `[raw ⊕ latent]` stops compounding/averaging | 0.00 (1.86/4 tasks) |
+| **+ subtask skill-hierarchy** | label demos by sub-task (env-replay), condition the flow *skill* on a target one-hot, drive with a next-incomplete scheduler | 0.28 |
+| **+ self-imitation / DAgger** ×2 | harvest the policy's own full-4 successes (19 expert demos → 500+), retrain | **0.68** |
+
+1. **Control-aware JEPA encoder.** A plain VICReg/predictive latent *trails raw obs*
+   on contact control (it smooths away fine detail). Adding an **inverse-dynamics head**
+   (predict `aₜ` from `zₜ, zₜ₊₁`, `--inverse-dynamics`) forces the latent to keep the
+   action-discriminative detail — lifting JEPA from 1.37 (worse than raw) to 1.86 (ties raw).
+2. **Action-chunked flow-matching policy** on `[raw ⊕ JEPA latent]`. Chunking kills
+   per-step compounding error; flow denoising represents the *multimodal* demos instead
+   of averaging them to mush (and samples ~10× cheaper than diffusion at equal quality).
+3. **Subtask skill-hierarchy.** Decomposing the 4-task chain so each sub-task is a fresh
+   short-horizon problem for the strong flow skill is the unlock (0 → 0.28 full-4).
+4. **Self-imitation (DAgger).** The policy already completes all 4 tasks sometimes; its
+   own successful trajectories are exactly the scarce full-sequence data the 19 expert
+   demos lacked. Two rounds: full-4 **0.28 → 0.57 → 0.68**.
+
+Final: **3.36/4 tasks (0.84 normalized), 0.68 full 4-task success** — top of the offline-RL
+SOTA band, entirely JEPA-based. Video: `runs/franka_kitchen/videos/kitchen_jepa_skill_hierarchy.mp4`.
 
 ## What The World Model Is Good For
 
@@ -527,6 +560,15 @@ python -m jepa_robotics.train_policy --task adroit_door \
   the JEPA latent, not by planning. See
   [What the world model is good for](#what-the-world-model-is-good-for).
 - Hierarchical JEPA's ceiling is the low-level controller's competence; weak
-  locomotion (offline-BC ant) caps the harder AntMaze layouts.
+  locomotion (offline-BC ant) caps the harder AntMaze layouts (~0.25–0.30, genuinely
+  hard offline benchmarks where 1.0 is not realistic).
 - The MPC refinement (where it helps) runs online, so policy + MPC is slower than
   the feed-forward policy alone.
+- On contact-rich long-horizon manipulation (FrankaKitchen), the plain JEPA latent
+  *trails raw obs* until an inverse-dynamics auxiliary makes it control-aware, and the
+  JEPA *predictor* is worse-than-no-op (planning is hopeless) — control there comes from
+  the encoder + an action-chunked flow skill-hierarchy + DAgger, not from the world model.
+- Clean negatives logged this round (kitchen): classifier-free guidance hurts, progress/
+  history conditioning and scheduler stall-rotation are within noise, and a single
+  bigger-net "stronger push" regressed — the wins came from the four ingredients above,
+  not from conditioning/capacity tweaks.
