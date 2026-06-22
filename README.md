@@ -17,7 +17,7 @@ hand:
 | 2 | **PointMaze** UMaze / Medium / Large | **Hierarchical JEPA** | 1.00 / 0.90 / 1.00 |
 | 2 | **AntMaze** UMaze (8-DoF ant) | Hierarchical JEPA | 0.93 |
 | 3 | **Adroit** Door / Hammer / Pen / Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
-| 4 | **FrankaKitchen** (4 sequential sub-tasks) | control-aware-JEPA skill-hierarchy + DAgger | **0.68 full-4** (3.36/4, 0.84 norm) |
+| 4 | **FrankaKitchen** (4 sequential sub-tasks) | control-aware-JEPA skill-hierarchy + online self-imitation | **0.90 full-4** (3.88/4 sub-tasks) |
 
 The repo is deliberately not one monolithic RL agent. It trains a JEPA predictive
 world model and a **goal-conditioned controller in its latent** — by behaviour
@@ -159,21 +159,22 @@ random data). The encoder is information-preserving enough (its state-probe loss
 forces the latent to reconstruct the full state) that BC clones the experts
 cleanly — the random-data latent only blocked RL *exploration*, never imitation.
 
-### Tier 4 — FrankaKitchen (4 compositional sub-tasks): 0.68 full-success, SOTA
+### Tier 4 — FrankaKitchen (4 compositional sub-tasks): 0.90 full-success
 
 The hardest tier cleared, and it needed the whole upgraded stack. A 9-DoF arm must
 complete an *ordered set* of 4 kitchen sub-tasks (microwave, kettle, light switch,
 slide cabinet). **Every flat controller scored 0** — BC, TD3+BC, IQL, CEM-MPC, and a
 latent Dreamer all fail, because the wall is *chaining*, not single-step control (the
 JEPA *predictor* is even worse-than-no-op here: contact-rich → model exploitation).
-Four ingredients, each earned by diagnosis, take it from 0 to SOTA:
+Five ingredients, each earned by diagnosis, take it from 0 to 0.90 full success:
 
 | step | what | full-4 |
 | --- | --- | ---: |
 | flat (BC / TD3+BC / IQL / MPC / Dreamer) | single-step control on the latent | 0.00 |
 | **control-aware encoder** + **action-chunked flow** policy | inverse-dynamics head keeps contact detail; chunked flow on `[raw ⊕ latent]` stops compounding/averaging | 0.00 (1.86/4 tasks) |
 | **+ subtask skill-hierarchy** | label demos by sub-task (env-replay), condition the flow *skill* on a target one-hot, drive with a next-incomplete scheduler | 0.28 |
-| **+ self-imitation / DAgger** ×2 | harvest the policy's own full-4 successes (19 expert demos → 500+), retrain | **0.68** |
+| **+ self-imitation / DAgger** ×2 (offline) | harvest the policy's own full-4 successes (19 expert demos → 500+), retrain | 0.68 |
+| **+ online self-imitation fine-tuning** | warm-start, collect successes, fine-tune, iterate | **0.90** |
 
 1. **Control-aware JEPA encoder.** A plain VICReg/predictive latent *trails raw obs*
    on contact control (it smooths away fine detail). Adding an **inverse-dynamics head**
@@ -186,10 +187,27 @@ Four ingredients, each earned by diagnosis, take it from 0 to SOTA:
    short-horizon problem for the strong flow skill is the unlock (0 → 0.28 full-4).
 4. **Self-imitation (DAgger).** The policy already completes all 4 tasks sometimes; its
    own successful trajectories are exactly the scarce full-sequence data the 19 expert
-   demos lacked. Two rounds: full-4 **0.28 → 0.57 → 0.68**.
+   demos lacked. Two offline rounds: full-4 **0.28 → 0.57 → 0.68**.
+5. **Online self-imitation fine-tuning.** Warm-start the policy, collect fresh successes,
+   fine-tune, iterate — full-4 **0.68 → 0.81 → 0.87 → 0.90**.
 
-Final: **3.36/4 tasks (0.84 normalized), 0.68 full 4-task success** — top of the offline-RL
-SOTA band, entirely JEPA-based. Video: `runs/franka_kitchen/videos/kitchen_jepa_skill_hierarchy.mp4`.
+Final: **3.88/4 sub-tasks on average, 0.90 full 4-task success** (4 seeds), entirely JEPA-based.
+Videos: `runs/franka_kitchen/videos/kitchen_jepa_rl_tuned.mp4` (online-tuned, 0.90) and
+`kitchen_jepa_skill_hierarchy.mp4` (offline, 0.68).
+
+**Behaviour analysis** (`scripts/analyze_kitchen_behavior.py`) pinpoints the bottleneck: the **3rd
+task, the light switch**. Microwave and kettle are always ~1.0; the early policy flipped the switch
+only 0.33 of the time and stalled there, and since the policy runs a fixed
+microwave→kettle→light-switch→slide-cabinet order, raising switch-completion to 0.88 cascaded into
+full sequences. **Negative result on RL:** an *actual* advantage-weighted-regression objective
+(`scripts/finetune_skill_rl.py`) matched self-imitation at its peak (0.93) but then *collapsed*
+(on-policy instability) — the bottleneck is skill *reliability*, not exploration/credit-assignment,
+so filtered self-imitation (an accumulating success buffer) is the more robust tool here.
+
+*(Metric note: these are mean-subtask and full-sequence rates on the D4RL partial+complete offline
+demos; "online fine-tuning" here means the policy's own rollouts, not reward-based RL. Published
+FrankaKitchen "success rates" vary by metric and setting — full-sequence vs mean-subtask, offline vs
+online — so direct cross-paper ranking needs matching the exact protocol.)*
 
 ## What The World Model Is Good For
 

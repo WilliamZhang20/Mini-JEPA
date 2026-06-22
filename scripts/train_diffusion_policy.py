@@ -98,6 +98,8 @@ def main() -> None:
     p.add_argument("--objective", choices=["diffusion", "flow"], default="diffusion",
                    help="diffusion=DDPM noise-prediction; flow=conditional/rectified flow matching (faster ODE sampling)")
     p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--init-from", type=Path, default=None,
+                   help="warm-start the policy weights from an existing checkpoint (online fine-tuning)")
     p.add_argument("--progress-cond", action="store_true",
                    help="append a scalar 'subtasks completed so far' (/4) to the conditioning — a lightweight "
                         "hierarchy that tells the policy its stage in the sequence (targets chaining/full-4)")
@@ -166,6 +168,9 @@ def main() -> None:
     ddpm = make_ddpm(args.diffusion_steps, dev)
     abar = ddpm["abar"]
     net = EpsNet(chunk_dim, cond_dim, args.hidden, n_blocks=args.n_blocks).to(dev)
+    if args.init_from is not None:   # warm-start (online fine-tuning) from an existing policy
+        ick = torch.load(args.init_from, map_location=dev, weights_only=False)
+        net.load_state_dict(ick["ema"]); print(json.dumps({"event": "warm_start", "from": str(args.init_from)}), flush=True)
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
     # EMA weights (diffusion policies rely heavily on EMA for stable sampling)
     ema = {k: v.detach().clone() for k, v in net.state_dict().items()}

@@ -21,6 +21,30 @@ from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
 from scripts.train_diffusion_policy import EpsNet, make_ddpm
 
+TASKS = ["microwave", "kettle", "light switch", "slide cabinet"]   # standard D4RL complete-v2 set
+
+
+class Scheduler:
+    """Pick the target subtask. Default: first incomplete (canonical). With a
+    timeout: if the current target stalls, rotate to the next incomplete one so
+    the policy attempts all remaining tasks instead of dead-ending on a hard one."""
+    def __init__(self, timeout=0):
+        self.timeout = timeout; self.cur = 0; self.t_on = 0
+
+    def update(self, done_tasks):
+        done_idx = {i for i, t in enumerate(TASKS) if t in done_tasks}
+        incomplete = [i for i in range(len(TASKS)) if i not in done_idx]
+        if not incomplete:
+            return self.cur
+        if self.cur not in incomplete:                       # current done -> advance
+            self.cur = incomplete[0]; self.t_on = 0
+        elif self.timeout > 0 and self.t_on >= self.timeout:  # stalled -> rotate
+            order = [i for i in incomplete if i > self.cur] + [i for i in incomplete if i < self.cur]
+            self.cur = order[0]; self.t_on = 0
+        else:
+            self.t_on += 1
+        return self.cur
+
 
 @torch.no_grad()
 def sample_chunk(net, ddpm, cond, chunk_dim, device, objective="diffusion", flow_steps=16, cfg_weight=1.0):
@@ -78,6 +102,9 @@ def main() -> None:
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--video-tail", type=int, default=30,
+                   help="extra frames simulated AFTER success so the final motion (e.g. cabinet slide) "
+                        "completes instead of the clip cutting off at the completion threshold")
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
 
@@ -97,7 +124,6 @@ def main() -> None:
     concat_raw = bool(ck.get("concat_raw", False))
     progress_cond = bool(ck.get("progress_cond", False))
     subtask_cond = bool(ck.get("subtask_cond", False))
-    TASKS = ["microwave", "kettle", "light switch", "slide cabinet"]
 
     def encode(obs, progress=0.0, target=None):
         x = torch.from_numpy(norm.encode(flatten_obs(obs))).unsqueeze(0).to(dev)
@@ -114,26 +140,6 @@ def main() -> None:
                 oh[0, target] = 1.0
             z = torch.cat([z, oh], dim=-1)
         return z
-
-    class Scheduler:
-        """Pick the target subtask. Default: first incomplete (canonical). With a
-        timeout: if the current target stalls, rotate to the next incomplete one so
-        the policy attempts all remaining tasks instead of dead-ending on a hard one."""
-        def __init__(self, timeout):
-            self.timeout = timeout; self.cur = 0; self.t_on = 0
-        def update(self, done_tasks):
-            done_idx = {i for i, t in enumerate(TASKS) if t in done_tasks}
-            incomplete = [i for i in range(len(TASKS)) if i not in done_idx]
-            if not incomplete:
-                return self.cur
-            if self.cur not in incomplete:                       # current done -> advance
-                self.cur = incomplete[0]; self.t_on = 0
-            elif self.timeout > 0 and self.t_on >= self.timeout:  # stalled -> rotate
-                order = [i for i in incomplete if i > self.cur] + [i for i in incomplete if i < self.cur]
-                self.cur = order[0]; self.t_on = 0
-            else:
-                self.t_on += 1
-            return self.cur
 
     from collections import deque
     tasks = []
@@ -205,6 +211,19 @@ def main() -> None:
                 hist.append(encode(obs, progress, target)); step_i += 1; j += 1
                 f = env.render()
                 if f is not None: frames.append(f)
+            # follow-through tail: the episode terminates the instant the last task crosses its
+            # completion threshold, cutting the motion short. Keep stepping the underlying sim with
+            # the last action (continuing then holding the chunk) so the final slide/open completes.
+            if chunk is not None:
+                for k in range(args.video_tail):
+                    a = np.clip(chunk[min(j + k, H - 1)], low, high).astype(np.float32)
+                    try:
+                        env.unwrapped.step(a)
+                    except Exception:
+                        if frames: frames.append(frames[-1])   # fallback: hold the last frame
+                        continue
+                    f = env.render()
+                    if f is not None: frames.append(f)
             vtasks.append(int(info.get("tasks_done", 0)))
             env.close()
         imageio.mimsave(args.video_out, frames, fps=args.fps, format="FFMPEG")

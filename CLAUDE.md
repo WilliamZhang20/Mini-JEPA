@@ -42,7 +42,7 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 | 2 | AntMaze UMaze | H-JEPA (BC low-level) | 0.93 |
 | 2 | AntMaze Medium/Large | H-JEPA (uncapping low-level) | in progress |
 | 3 | Adroit Door/Hammer/Pen/Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
-| 4 | FrankaKitchen-v1 | **control-aware-JEPA skill-hierarchy + DAgger** | **0.68 full-4** (3.36/4 tasks, 0.84 norm) |
+| 4 | FrankaKitchen-v1 | **control-aware-JEPA skill-hierarchy + online self-imitation** | **0.90 full-4 success** (3.88/4 sub-tasks) |
 
 Tiers 1–4 essentially cleared. The three recurring lessons (see roadmaps + README):
 **(a)** JEPA's *encoder/representation* is what carries control (BC/RL/diffusion act in the latent); its
@@ -88,7 +88,7 @@ hand). `AdroitHandDoor-v1` is already stubbed in `tasks.py` (`controller="none"`
 *Needs:* a learned (not scripted) data source — offline RL datasets or an RL teacher — plus a stochastic
 world model to handle contact noise.
 
-### Tier 4 — FrankaKitchen-v1  ✅ **SOLVED at SOTA (0.68 full-4, 3.36/4 tasks), fully JEPA-based**
+### Tier 4 — FrankaKitchen-v1  ✅ **0.90 full-4 success (3.88/4 sub-tasks), fully JEPA-based**
 9-DoF arm, **compositional sequential sub-tasks** (microwave/kettle/light switch/slide cabinet — the standard
 D4RL complete-v2 set). The hardest tier we've cleared, and it needed the full upgraded stack. Every *flat*
 controller (BC/TD3+BC/IQL/CEM-MPC/latent-Dreamer) scored **0** — chaining, not single-step control, is the wall;
@@ -103,8 +103,16 @@ sampling); (3) **subtask skill-hierarchy** — label demos by subtask via env-re
 with a trivial next-incomplete-subtask scheduler in `eval_diffusion_policy.py` → each subtask is a fresh
 short-horizon problem (0→2.56/4, full-4 0.28); (4) **self-imitation / DAgger** — harvest the policy's own full-4
 successes (`eval_diffusion_policy.py --collect-out`), augment the scarce 19 expert demos to 500+, retrain
-(full-4 0.28→0.57→0.68 over two rounds). *Best policy* `runs/franka_kitchen/checkpoints/kitchen_flow_skill_v5.pt`;
-*video* `runs/franka_kitchen/videos/kitchen_jepa_skill_hierarchy.mp4`. SLURM: `scripts/kitchen_hierarchy.slurm`.
+(full-4 0.28→0.57→0.68); (5) **online self-imitation fine-tuning** (warm-start + collect-successes + fine-tune,
+iterated; `--init-from`) → full-4 **0.68→0.81→0.87→0.90**. *Best policy*
+`runs/franka_kitchen/checkpoints/kitchen_flow_skill_ft3.pt`; *videos* `kitchen_jepa_rl_tuned.mp4` (online-tuned 0.90),
+`kitchen_jepa_skill_hierarchy.mp4` (offline 0.68). SLURM: `scripts/kitchen_hierarchy.slurm`.
+**Behaviour (`scripts/analyze_kitchen_behavior.py`):** the bottleneck is the *3rd task, light switch* (0.33→0.88
+across fine-tuning; microwave/kettle always ~1.0; fixed microwave→kettle→light-switch→slide-cabinet order).
+**Negative on RL:** an *actual* advantage-weighted-regression objective (`scripts/finetune_skill_rl.py`) matched
+self-imitation at peak (0.93) but then *collapsed* (on-policy instability) — the bottleneck is skill-reliability,
+not exploration/credit-assignment, so filtered self-imitation (accumulating-success buffer) is the better, more
+robust tool here.
 
 ### Tier 5 — Shadow Dexterous Hand in-hand manipulation  *(ultimate)*
 `HandReach` (warm-up, 20-DoF reach) → `HandManipulateBlock` → `HandManipulateEgg` → `HandManipulatePen`,
