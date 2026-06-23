@@ -184,6 +184,47 @@ class LowLevelChunk:
         return np.clip(a, self.low, self.high).astype(np.float32)
 
 
+class LowLevelFlow:
+    """Action-chunked rectified-flow walker: samples a coherent H-step gait chunk
+    from the conditional flow (multimodality preserved, no BC mush) and executes
+    it receding-horizon. Conditions on the JEPA latent (+ raw obs if concat_raw)."""
+
+    def __init__(self, wm_path, bc_path, low, high, device="cpu", replan=None, flow_steps=10):
+        import torch
+        from jepa_robotics.evaluate import load_jepa_artifact
+        from scripts.train_flow_walker import FlowNet
+        self._torch = torch
+        self.dev = torch.device(device)
+        self.model, self.norm, self.spec, _ = load_jepa_artifact(Path(wm_path), self.dev)
+        art = torch.load(Path(bc_path), map_location=self.dev, weights_only=False)
+        cfg = art["config"]
+        self.chunk = int(cfg["chunk"]); self.action_dim = int(cfg["action_dim"])
+        self.concat_raw = bool(cfg["concat_raw"]); self.chunk_dim = int(cfg["chunk_dim"])
+        self.net = FlowNet(int(cfg["chunk_dim"]), int(cfg["cond_dim"]), int(cfg["hidden"])).to(self.dev)
+        self.net.load_state_dict(art["flow"]); self.net.eval(); self.model.eval()
+        self.low, self.high = low, high
+        self.replan = replan or self.chunk
+        self.flow_steps = flow_steps
+        self._buf = []
+        self._last_sg = None
+
+    def act(self, obs, subgoal):
+        sg = np.asarray(subgoal, dtype=np.float32)
+        if (not self._buf) or self._last_sg is None or np.linalg.norm(sg - self._last_sg) > 1e-6:
+            o = {k: np.array(v, copy=True) for k, v in obs.items()}
+            o["desired_goal"] = sg
+            s = self._torch.from_numpy(self.norm.encode(flatten_obs(o))).unsqueeze(0).to(self.dev)
+            with self._torch.no_grad():
+                z = self.model.encode(s)
+                c = self._torch.cat([z, s], dim=1) if self.concat_raw else z
+                x = self.net.sample(c, self.chunk_dim, self.flow_steps)[0].cpu().numpy()
+            chunk = x.reshape(self.chunk, self.action_dim)
+            self._buf = list(chunk[: self.replan])
+            self._last_sg = sg
+        a = self._buf.pop(0)
+        return np.clip(a, self.low, self.high).astype(np.float32)
+
+
 # ----------------------------- rollouts -------------------------------------
 def run_flat(env_id, max_steps, low, episodes, seed):
     succ = []
@@ -232,7 +273,7 @@ def run_hjepa(env_id, max_steps, low, landmarks, adj, episodes, seed, reach_radi
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="point_umaze")
-    p.add_argument("--low-type", default="sb3", choices=["sb3", "bc", "chunk"])
+    p.add_argument("--low-type", default="sb3", choices=["sb3", "bc", "chunk", "flow"])
     p.add_argument("--low-policy", type=Path, default=None, help="SB3 HER low-level .zip (low-type sb3)")
     p.add_argument("--bc-policy", type=Path, default=None, help="BC GoalConditionedPolicy .pt (low-type bc)")
     p.add_argument("--jepa-model", type=Path, default=None, help="JEPA WM (.pt); fallback for sb3, encoder for bc")
@@ -276,6 +317,9 @@ def main() -> None:
     elif args.low_type == "chunk":
         low = LowLevelChunk(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high,
                             device=args.device)
+    elif args.low_type == "flow":
+        low = LowLevelFlow(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high,
+                           device=args.device)
     else:
         low = LowLevel(args.low_policy, env, device=args.device)
     env.close()
