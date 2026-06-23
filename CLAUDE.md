@@ -270,9 +270,18 @@ features actually *help* the small MLP policy). New code: `scripts/train_gcrl_ra
 IQL), `--raw` mode in `train_offline_td3bc.py`, and **`scripts/eval_hjepa2.py` — a PROPER two-tier H-JEPA**
 (learned high-level JEPA-2 feasibility model over the abstract latent + directed A* search/pruning, replacing
 the empirical-reachability Dijkstra graph; matches the graph at 0.23, confirming the planner is not the
-ceiling). Video: `runs/antmaze_medium/videos/antmaze_medium_hjepa.mp4`. The remaining lever for real SOTA
-(~0.7 medium) is a robust offline-RL *walker* (e.g. a properly-tuned/recurrent or action-chunked locomotion
-policy that doesn't fall) — a larger effort. UMaze (0.93, graph low-level) is the working showcase.
+ceiling). Video: `runs/antmaze_medium/videos/antmaze_medium_hjepa.mp4`. UMaze (0.93, graph low-level) is the working
+showcase. **Two further attempts (both negative, instructive):** (1) the *true* HWM planner —
+`eval_hjepa2.py --planner cem` does CEM optimization over a CONTINUOUS sequence of subgoal offsets in latent
+space (not discrete A*-over-landmarks), but scores 0.00: the latent-proxy feasibility can't reason about
+walls at *future* positions along a multi-hop rollout (A*'s empirical edges encode that structure, which is
+why discrete search is the tractable approximation). (2) **action-chunked locomotion** (`train_chunked_walker.py`,
+`eval_hjepa_maze.py --low-type chunk`) — predict an 8-step action chunk for gait stability — also 0.00:
+**BC averages the multimodal HER chunks to mush** (the exact kitchen failure mode; BC loss floors ~0.145).
+The genuine SOTA path is therefore the full kitchen stack adapted to a goal-conditioned walker: action-chunked
+**flow** (models multimodality instead of averaging) + HER + self-imitation/DAgger — a multi-hour build,
+documented as the next effort. Net: AntMaze navigation/architecture are solved (proper two-tier H-JEPA +
+both A* and CEM planners); the robust offline *walker* is the unbroken wall.
 
 # Infra note
 GPU control node `watgpu208` has a broken SLURM GPU cgroup (`/dev/nvidia-uvm` PermissionError → `cuInit`

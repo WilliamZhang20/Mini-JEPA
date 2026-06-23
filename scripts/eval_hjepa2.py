@@ -167,6 +167,69 @@ def plan_astar(model, z_start, start_pos, goal_pos, landmarks, device, goal_dim,
     return [landmarks[i] for i in path[::-1]]
 
 
+@torch.no_grad()
+def plan_cem(model, z_start, start_pos, goal_pos, device, goal_dim, horizon=6,
+            iters=5, samples=512, elite=0.1, max_off=3.0, w_infeas=4.0, w_len=0.02, seed=0):
+    """TRUE HWM planning: CEM optimization over a CONTINUOUS sequence of macro-
+    actions (subgoal offsets) in latent space, scored by the learned JEPA-2 model.
+
+    Unlike A*-over-landmarks (discrete node selection), this optimizes the subgoals
+    as continuous points: it samples offset sequences, rolls predicted positions
+    p_i = start + cumsum(offsets), scores each hop's feasibility with JEPA-2
+    (infeasible hops = walls are penalised), plus terminal distance-to-goal and
+    path length, and refits a Gaussian to the elites. Returns the FIRST subgoal
+    (an arbitrary continuous point, not a landmark).
+    """
+    rng = np.random.default_rng(seed)
+    g = torch.as_tensor(goal_pos, dtype=torch.float32, device=device)
+    s = torch.as_tensor(start_pos, dtype=torch.float32, device=device)
+    zb = z_start.expand(samples * horizon, -1)
+    # init mean: evenly step toward the goal over the horizon
+    mean = ((g - s) / horizon).cpu().numpy()[None].repeat(horizon, 0)   # [H, goal_dim]
+    std = np.full_like(mean, max_off * 0.5)
+    best_first = mean[0].copy(); best_cost = np.inf
+    for _ in range(iters):
+        offs = rng.normal(mean, std, size=(samples, horizon, goal_dim)).astype(np.float32)
+        offs = np.clip(offs, -max_off, max_off)
+        offs_t = torch.from_numpy(offs).to(device)
+        pos = s[None, None] + torch.cumsum(offs_t, dim=1)                 # [S, H, goal_dim]
+        f, _ = model(zb, offs_t.reshape(-1, goal_dim))
+        feas = torch.sigmoid(f).reshape(samples, horizon)
+        terminal = (pos[:, -1] - g).norm(dim=-1)
+        infeas = (1.0 - feas).sum(dim=1)
+        length = offs_t.norm(dim=-1).sum(dim=1)
+        cost = (terminal + w_infeas * infeas + w_len * length).cpu().numpy()
+        order = np.argsort(cost)
+        if cost[order[0]] < best_cost:
+            best_cost = float(cost[order[0]]); best_first = offs[order[0], 0].copy()
+        elites = offs[order[: max(1, int(samples * elite))]]
+        mean = elites.mean(0); std = np.maximum(elites.std(0), 0.1)
+    return (np.asarray(start_pos, np.float32) + best_first)               # first continuous subgoal
+
+
+def run_hjepa2_cem(env_id, max_steps, low, model, episodes, seed, reach_radius,
+                   subgoal_timeout, device, goal_dim, max_off, replan_every=25):
+    """Continuous HWM control: re-plan the subgoal with CEM every ``replan_every``
+    steps (receding horizon), execute it with the JEPA-1 low level."""
+    succ = []
+    for ep in range(episodes):
+        env = make_env(env_id, seed=seed + ep, max_episode_steps=max_steps)
+        obs, _ = env.reset(seed=seed + ep)
+        goal = np.asarray(obs["desired_goal"], np.float32)
+        term = trunc = False; info = {}; t = 0; sg = goal
+        while not (term or trunc):
+            if t % replan_every == 0:
+                cur = np.asarray(obs["achieved_goal"], np.float32)
+                z = low.model.encode(low._torch.from_numpy(
+                    low.norm.encode(flatten_obs(obs))).unsqueeze(0).to(device))
+                sg = plan_cem(model, z, cur, goal, device, goal_dim, max_off=max_off, seed=seed + ep)
+            a = low.act(obs, sg)
+            obs, _, term, trunc, info = env.step(a); t += 1
+        succ.append(float(info.get("is_success", info.get("success", 0.0))))
+        env.close()
+    return float(np.mean(succ))
+
+
 def run_hjepa2(env_id, max_steps, low, model, landmarks, episodes, seed, reach_radius,
                subgoal_timeout, device, goal_dim, feas_thresh, max_off):
     succ = []
@@ -205,6 +268,10 @@ def main() -> None:
     p.add_argument("--subgoal-timeout", type=int, default=60)
     p.add_argument("--feas-thresh", type=float, default=0.5)
     p.add_argument("--max-off", type=float, default=6.0)
+    p.add_argument("--planner", choices=["astar", "cem"], default="astar",
+                   help="astar: directed search over landmarks (discrete). cem: TRUE HWM "
+                        "continuous CEM optimization over subgoal offsets in latent space.")
+    p.add_argument("--replan-every", type=int, default=25)
     p.add_argument("--device", default="cpu")
     args = p.parse_args()
 
@@ -227,9 +294,16 @@ def main() -> None:
     model, max_pos_off = train_jepa2(low.model, low.norm, spec, episodes, args.k_reach, dev)
     print(json.dumps({"event": "jepa2_ready", "landmarks": len(lm), "max_pos_off": round(max_pos_off, 2)}), flush=True)
 
-    hj = run_hjepa2(task.env_id, task.max_episode_steps, low, model, lm, args.episodes, args.seed,
-                    args.reach_radius, args.subgoal_timeout, dev, spec.goal_dim, args.feas_thresh, args.max_off)
-    print(json.dumps({"task": task.name, "policy": "H-JEPA2 (learned high-level + A* search)",
+    if args.planner == "cem":
+        hj = run_hjepa2_cem(task.env_id, task.max_episode_steps, low, model, args.episodes, args.seed,
+                            args.reach_radius, args.subgoal_timeout, dev, spec.goal_dim, args.max_off,
+                            replan_every=args.replan_every)
+        name = "H-JEPA2 (continuous CEM macro-action optimization)"
+    else:
+        hj = run_hjepa2(task.env_id, task.max_episode_steps, low, model, lm, args.episodes, args.seed,
+                        args.reach_radius, args.subgoal_timeout, dev, spec.goal_dim, args.feas_thresh, args.max_off)
+        name = "H-JEPA2 (learned high-level + A* search)"
+    print(json.dumps({"task": task.name, "policy": name,
                       "landmarks": len(lm), "episodes": args.episodes, "success_rate": round(hj, 4)}), flush=True)
 
 

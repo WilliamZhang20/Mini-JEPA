@@ -144,6 +144,46 @@ class LowLevelBC:
         return np.clip(a, self.low, self.high).astype(np.float32)
 
 
+class LowLevelChunk:
+    """Action-chunked goal-conditioned walker: predicts a chunk of H actions and
+    executes it (receding horizon, re-predicting on chunk exhaustion or subgoal
+    change). The coherent chunk keeps the ant's gait stable so it stops falling."""
+
+    def __init__(self, wm_path, bc_path, low, high, device="cpu", replan=None):
+        import torch
+        from jepa_robotics.evaluate import load_jepa_artifact
+        from scripts.train_chunked_walker import ChunkPolicy
+        self._torch = torch
+        self.dev = torch.device(device)
+        self.model, self.norm, self.spec, _ = load_jepa_artifact(Path(wm_path), self.dev)
+        art = torch.load(Path(bc_path), map_location=self.dev, weights_only=False)
+        cfg = art["config"]
+        self.raw = bool(cfg.get("raw", False))
+        self.chunk = int(cfg["chunk"])
+        self.policy = ChunkPolicy(int(cfg["latent_dim"]), int(cfg["action_dim"]),
+                                  self.chunk, int(cfg["hidden_dim"])).to(self.dev)
+        self.policy.load_state_dict(art["policy"]); self.policy.eval()
+        self.model.eval()
+        self.low, self.high = low, high
+        self.replan = replan or self.chunk
+        self._buf = []
+        self._last_sg = None
+
+    def act(self, obs, subgoal):
+        sg = np.asarray(subgoal, dtype=np.float32)
+        if (not self._buf) or self._last_sg is None or np.linalg.norm(sg - self._last_sg) > 1e-6:
+            o = {k: np.array(v, copy=True) for k, v in obs.items()}
+            o["desired_goal"] = sg
+            s = self._torch.from_numpy(self.norm.encode(flatten_obs(o))).unsqueeze(0).to(self.dev)
+            with self._torch.no_grad():
+                z = s if self.raw else self.model.encode(s)
+                chunk = self.policy(z)[0].cpu().numpy()
+            self._buf = list(chunk[: self.replan])
+            self._last_sg = sg
+        a = self._buf.pop(0)
+        return np.clip(a, self.low, self.high).astype(np.float32)
+
+
 # ----------------------------- rollouts -------------------------------------
 def run_flat(env_id, max_steps, low, episodes, seed):
     succ = []
@@ -192,7 +232,7 @@ def run_hjepa(env_id, max_steps, low, landmarks, adj, episodes, seed, reach_radi
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="point_umaze")
-    p.add_argument("--low-type", default="sb3", choices=["sb3", "bc"])
+    p.add_argument("--low-type", default="sb3", choices=["sb3", "bc", "chunk"])
     p.add_argument("--low-policy", type=Path, default=None, help="SB3 HER low-level .zip (low-type sb3)")
     p.add_argument("--bc-policy", type=Path, default=None, help="BC GoalConditionedPolicy .pt (low-type bc)")
     p.add_argument("--jepa-model", type=Path, default=None, help="JEPA WM (.pt); fallback for sb3, encoder for bc")
@@ -233,6 +273,9 @@ def main() -> None:
     if args.low_type == "bc":
         low = LowLevelBC(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high,
                          device=args.device)
+    elif args.low_type == "chunk":
+        low = LowLevelChunk(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high,
+                            device=args.device)
     else:
         low = LowLevel(args.low_policy, env, device=args.device)
     env.close()
