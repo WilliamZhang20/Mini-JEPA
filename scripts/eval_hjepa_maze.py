@@ -127,7 +127,10 @@ class LowLevelBC:
         self._torch = torch
         self.dev = torch.device(device)
         self.model, self.norm, self.spec, _ = load_jepa_artifact(Path(wm_path), self.dev)
-        self.policy, _ = load_policy_artifact(Path(bc_path), self.dev)
+        self.policy, pcfg = load_policy_artifact(Path(bc_path), self.dev)
+        # A raw policy (train_gcrl_raw.py) acts on the normalized observation
+        # directly; a latent policy acts on the JEPA encoding of it.
+        self.raw = bool(pcfg.get("raw", False))
         self.model.eval(); self.policy.eval()
         self.low, self.high = low, high
 
@@ -136,7 +139,8 @@ class LowLevelBC:
         o["desired_goal"] = np.asarray(subgoal, dtype=np.float32)
         s = self._torch.from_numpy(self.norm.encode(flatten_obs(o))).unsqueeze(0).to(self.dev)
         with self._torch.no_grad():
-            a = self.policy(self.model.encode(s))[0].cpu().numpy()
+            z = s if self.raw else self.model.encode(s)
+            a = self.policy(z)[0].cpu().numpy()
         return np.clip(a, self.low, self.high).astype(np.float32)
 
 

@@ -36,6 +36,7 @@ def make_env(
     render_mode: str | None = None,
     width: int | None = None,
     height: int | None = None,
+    canonical_task: str | None = None,
 ):
     import gymnasium as gym
 
@@ -78,6 +79,10 @@ def make_env(
     # expose only the 59-D ``observation`` and surface task-completion as success.
     if "Kitchen" in env_id:
         env = KitchenFlattenWrapper(env)
+    # Roadmap B: unify reach/push/pick into one observation space so a single
+    # JEPA model + policy can serve all three Fetch skills.
+    if canonical_task is not None:
+        env = CanonicalFetchWrapper(env, canonical_task)
     if seed is not None:
         env.action_space.seed(seed)
     return env
@@ -138,6 +143,106 @@ def _make_success_alias_wrapper():
 
 
 SuccessAliasWrapper = _make_success_alias_wrapper()
+
+
+# ---------------------------------------------------------------------------
+# Roadmap B: one world model + one policy for reach + push + pick-and-place.
+#
+# The three Fetch tasks share the 4-D action space and goal-conditioned
+# structure but differ in observation width (reach: obs=10 -> state=16;
+# push/pick: obs=25 -> state=31). The canonical adapter maps every Fetch env
+# into ONE fixed-width "superset" observation so a single encoder can serve all
+# skills. The layout is the 25-D push/pick observation (object fields zero-filled
+# for reach, whose gripper IS its achieved_goal), plus an ``object_present`` flag
+# and a 3-way task one-hot. Keeping the gripper/object fields at the *same*
+# indices across tasks (rather than naive zero-padding) is what lets the shared
+# encoder learn consistent semantics.
+# ---------------------------------------------------------------------------
+
+# Canonical observation = [25-D superset Fetch obs] + [object_present] + [task one-hot(3)]
+CANONICAL_FETCH_OBS_DIM = 25 + 1 + 3   # = 29
+CANONICAL_FETCH_GOAL_DIM = 3
+CANONICAL_FETCH_STATE_DIM = CANONICAL_FETCH_OBS_DIM + 2 * CANONICAL_FETCH_GOAL_DIM  # = 35
+# One-hot order; index into the trailing flags (object_present is flag 0).
+CANONICAL_FETCH_TASK_ORDER = ("reach", "push", "pick")
+# Index of ``object_present`` within the flattened canonical state (== obs index,
+# since obs starts at 0). Used by the manip MPC score to gate grasp/reach terms.
+CANONICAL_OBJECT_PRESENT_IDX = 25
+
+# Per-task wiring for the unified controller: short name -> (env_id, scripted
+# controller, has_object). ``max_episode_steps`` matches the per-task specialists.
+FETCH_MULTI_SUBTASKS = (
+    {"name": "reach", "env_id": "FetchReach-v4", "controller": "reach",
+     "has_object": False, "max_episode_steps": 50},
+    {"name": "push", "env_id": "FetchPush-v4", "controller": "push",
+     "has_object": True, "max_episode_steps": 100},
+    {"name": "pick", "env_id": "FetchPickAndPlace-v4", "controller": "pick_place",
+     "has_object": True, "max_episode_steps": 100},
+)
+
+
+def canonical_fetch_spec() -> "ObsSpec":
+    """The single ObsSpec shared by reach/push/pick under the canonical adapter."""
+    return ObsSpec(
+        obs_dim=CANONICAL_FETCH_OBS_DIM,
+        goal_dim=CANONICAL_FETCH_GOAL_DIM,
+        state_dim=CANONICAL_FETCH_STATE_DIM,
+        action_dim=4,
+        is_goal_env=True,
+    )
+
+
+def _make_canonical_fetch_wrapper():
+    import gymnasium as gym
+    from gymnasium import spaces
+
+    class _CanonicalFetch(gym.ObservationWrapper):
+        """Remap a Fetch env's observation into the unified canonical layout.
+
+        ``canonical_task`` is one of ``reach`` / ``push`` / ``pick`` and fixes the
+        task one-hot and ``object_present`` flag. The achieved/desired goals are
+        already 3-D in every Fetch env and pass through unchanged.
+        """
+
+        def __init__(self, env, canonical_task: str):
+            super().__init__(env)
+            if canonical_task not in CANONICAL_FETCH_TASK_ORDER:
+                raise ValueError(f"Unknown canonical_task {canonical_task!r}")
+            self.canonical_task = canonical_task
+            self._onehot = CANONICAL_FETCH_TASK_ORDER.index(canonical_task)
+            self._object_present = 0.0 if canonical_task == "reach" else 1.0
+            spaces_dict = dict(env.observation_space.spaces)
+            spaces_dict["observation"] = spaces.Box(
+                -np.inf, np.inf, shape=(CANONICAL_FETCH_OBS_DIM,), dtype=np.float32
+            )
+            self.observation_space = spaces.Dict(spaces_dict)
+
+        def observation(self, obs):
+            o = np.asarray(obs["observation"], dtype=np.float32).reshape(-1)
+            canon = np.zeros(25, dtype=np.float32)
+            if self.canonical_task == "reach":
+                # FetchReach obs (10-D): grip_pos[0:3], gripper_state[3:5],
+                # grip_velp[5:8], gripper_vel[8:10]. The object fields stay zero;
+                # object_pos is set to the gripper so achieved_goal == object slot.
+                canon[0:3] = o[0:3]      # grip_pos
+                canon[3:6] = o[0:3]      # object_pos := gripper (no real object)
+                canon[9:11] = o[3:5]     # gripper_state (fingers)
+                canon[20:23] = o[5:8]    # grip_velp
+                canon[23:25] = o[8:10]   # gripper_vel
+            else:
+                # FetchPush/PickAndPlace obs is already the 25-D superset layout.
+                canon[:25] = o[:25]
+            flags = np.zeros(4, dtype=np.float32)
+            flags[0] = self._object_present
+            flags[1 + self._onehot] = 1.0
+            new_obs = dict(obs)
+            new_obs["observation"] = np.concatenate([canon, flags]).astype(np.float32)
+            return new_obs
+
+    return _CanonicalFetch
+
+
+CanonicalFetchWrapper = _make_canonical_fetch_wrapper()
 
 
 def flatten_obs(obs) -> np.ndarray:

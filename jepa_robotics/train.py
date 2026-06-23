@@ -390,15 +390,17 @@ def main() -> None:
 
     env = make_env(args.env_id, seed=args.seed, max_episode_steps=args.max_episode_steps)
     if args.episodes_npz is not None:
-        # Tier-3 path: no scripted expert, so train the world model on
-        # pre-collected trajectories from a learned RL teacher (Adroit).
-        from .data import load_episodes_npz
+        # Pre-collected trajectories: an RL teacher (Adroit) OR the canonical
+        # multi-task Fetch union (Roadmap B). When the npz carries its own
+        # ObsSpec (canonical union, whose 35-D state matches no single env), use
+        # it; otherwise fall back to the env's spec (Adroit teacher data).
+        from .data import load_episodes_npz, load_spec_npz
         from .envs import obs_spec_from_env
 
         episodes = load_episodes_npz(args.episodes_npz)
-        spec = obs_spec_from_env(env)
+        spec = load_spec_npz(args.episodes_npz) or obs_spec_from_env(env)
         print(json.dumps({"event": "loaded_episodes_npz", "path": str(args.episodes_npz),
-                          "episodes": len(episodes)}), flush=True)
+                          "episodes": len(episodes), "state_dim": spec.state_dim}), flush=True)
     else:
         episodes, spec = collect_episodes(
             env,
@@ -498,9 +500,13 @@ def main() -> None:
 
     # The built-in eval is goal-reaching MPC; it is meaningless (and indexes
     # goal slices that don't exist) for non-goal tasks like Adroit, where the
-    # control policy is learned/BC'd separately. Skip it for those.
-    if spec.is_goal_env and spec.goal_dim > 0:
-        eval_env = make_env(args.env_id, seed=args.seed + 10_000, max_episode_steps=args.max_episode_steps)
+    # control policy is learned/BC'd separately. It also can't run when the model
+    # spec differs from the env spec (the canonical multi-task model, whose 35-D
+    # state matches no single env) — that case is evaluated by eval_fetch_multi.py.
+    from .envs import obs_spec_from_env
+
+    eval_env = make_env(args.env_id, seed=args.seed + 10_000, max_episode_steps=args.max_episode_steps)
+    if spec.is_goal_env and spec.goal_dim > 0 and obs_spec_from_env(eval_env) == spec:
         eval_metrics = evaluate_mpc(
             model,
             eval_env,
@@ -512,10 +518,10 @@ def main() -> None:
             horizon=args.mpc_horizon,
             seed=args.seed + 20_000,
         )
-        eval_env.close()
         print(json.dumps({"event": "eval", **eval_metrics}))
     else:
-        print(json.dumps({"event": "eval_skipped", "reason": "non_goal_env"}))
+        print(json.dumps({"event": "eval_skipped", "reason": "non_goal_env_or_spec_mismatch"}))
+    eval_env.close()
     save_checkpoint(args.save_path, model, optimizer, normalizer, spec, args, step)
     print(json.dumps({"event": "saved", "path": str(args.save_path)}))
     save_model_artifact(args.model_path, model, normalizer, spec, args)

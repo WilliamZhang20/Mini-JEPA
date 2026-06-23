@@ -49,6 +49,17 @@ class ManipScoringMixin:
         grip_to_obj = torch.linalg.norm(grip[..., :gd] - obj[..., :gd], dim=-1)  # [B, H]
         align_xy = torch.linalg.norm(grip[..., :2] - obj[..., :2], dim=-1)       # [B, H]
 
+        # Roadmap B: under the canonical multi-task adapter a reach episode has
+        # NO object (achieved_goal == gripper), so the gripper->object reach,
+        # align and grasp terms are meaningless and would push the planner to
+        # fiddle with the (absent) object / close the fingers for no reason. Gate
+        # them off when ``object_present`` is 0; the terminal/path object-to-goal
+        # term then collapses to the correct gripper->goal reaching cost. For
+        # single-task models ``object_present_idx`` is None and nothing changes.
+        op_idx = getattr(self, "object_present_idx", None)
+        object_present = True if op_idx is None else (float(raw_state[op_idx]) > 0.5)
+        op = 1.0 if object_present else 0.0
+
         terminal = obj_to_goal[:, -1]
         path = obj_to_goal.mean(dim=1)
         reach = grip_to_obj.mean(dim=1)
@@ -56,14 +67,14 @@ class ManipScoringMixin:
         scores = (
             terminal
             + self.manip_path_weight * path
-            + self.manip_reach_weight * reach
-            + self.manip_align_weight * align
+            + op * self.manip_reach_weight * reach
+            + op * self.manip_align_weight * align
         )
 
         # Grasp catalyst: when the gripper is on the object, reward closing the
         # fingers. Gripper command > 0 opens, < 0 closes, so we penalise an open
         # command weighted by how close the gripper is to the object.
-        if self.manip_grasp_weight > 0.0 and action_tensor.shape[-1] >= 4:
+        if object_present and self.manip_grasp_weight > 0.0 and action_tensor.shape[-1] >= 4:
             nearness = torch.exp(-grip_to_obj / 0.04)                          # [B, H], ~1 on the object
             open_cmd = torch.clamp(action_tensor[..., 3], min=-1.0)            # [B, H]
             grasp = (nearness * (open_cmd + 1.0)).mean(dim=1)                  # 0 when closed on object

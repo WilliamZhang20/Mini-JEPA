@@ -341,6 +341,116 @@ def collect_episodes(
     return episodes, spec
 
 
+def collect_fetch_multi_episodes(
+    *,
+    num_steps: int,
+    seed: int,
+    scripted_fraction: float,
+    controller_gain: float,
+    action_noise: float,
+    subtasks=None,
+    log_every: int = 0,
+) -> tuple[list[Episode], ObsSpec]:
+    """Roadmap B: collect a single union dataset across reach/push/pick.
+
+    Each episode samples one Fetch sub-task (round-robin), wraps its env with the
+    canonical adapter so every recorded state is the same 35-D superset, and runs
+    the matching scripted expert (plus a random fraction for coverage). The union
+    feeds one world model and one policy. Returns the shared canonical ObsSpec.
+    """
+    from .envs import FETCH_MULTI_SUBTASKS, canonical_fetch_spec, make_env
+
+    subtasks = list(subtasks or FETCH_MULTI_SUBTASKS)
+    spec = canonical_fetch_spec()
+    rng = np.random.default_rng(seed)
+    envs = {
+        st["name"]: make_env(
+            st["env_id"], seed=seed,
+            max_episode_steps=st["max_episode_steps"], canonical_task=st["name"],
+        )
+        for st in subtasks
+    }
+    controllers = {st["name"]: st["controller"] for st in subtasks}
+
+    episodes: list[Episode] = []
+    total_steps = 0
+    episode_idx = 0
+    while total_steps < num_steps:
+        st = subtasks[episode_idx % len(subtasks)]
+        name = st["name"]
+        env = envs[name]
+        controller = controllers[name]
+        obs, _ = env.reset(seed=seed + episode_idx)
+        states = [flatten_obs(obs)]
+        actions = []
+        terminated = truncated = False
+        while not (terminated or truncated) and total_steps < num_steps:
+            if rng.random() < scripted_fraction:
+                action = scripted_action(obs, spec.action_dim, controller_gain, controller, env, rng)
+                action += rng.normal(0.0, action_noise, size=spec.action_dim).astype(np.float32)
+                action = np.clip(action, env.action_space.low, env.action_space.high)
+            else:
+                action = env.action_space.sample().astype(np.float32)
+            next_obs, _, terminated, truncated, _ = env.step(action)
+            actions.append(action.astype(np.float32))
+            states.append(flatten_obs(next_obs))
+            obs = next_obs
+            total_steps += 1
+            if log_every > 0 and total_steps % log_every == 0:
+                print(
+                    f'{{"event": "collect", "steps": {total_steps}, '
+                    f'"target_steps": {num_steps}, "task": "{name}"}}',
+                    flush=True,
+                )
+        if actions:
+            episodes.append(
+                Episode(
+                    states=np.stack(states).astype(np.float32),
+                    actions=np.stack(actions).astype(np.float32),
+                )
+            )
+        episode_idx += 1
+
+    for env in envs.values():
+        env.close()
+    return episodes, spec
+
+
+def save_episodes_npz(path, episodes: list[Episode], spec: ObsSpec | None = None) -> None:
+    """Save episodes (variable length) plus an optional ObsSpec to a .npz.
+
+    The spec is stored so that downstream training can recover the (canonical)
+    state width without re-deriving it from an env — essential for the unified
+    Fetch model whose state_dim differs from any single env's."""
+    payload = {
+        "states": np.array([e.states for e in episodes], dtype=object),
+        "actions": np.array([e.actions for e in episodes], dtype=object),
+    }
+    if spec is not None:
+        payload.update(
+            spec_obs_dim=spec.obs_dim,
+            spec_goal_dim=spec.goal_dim,
+            spec_state_dim=spec.state_dim,
+            spec_action_dim=spec.action_dim,
+            spec_is_goal_env=spec.is_goal_env,
+        )
+    np.savez(path, **payload)
+
+
+def load_spec_npz(path) -> ObsSpec | None:
+    """Recover an ObsSpec saved alongside episodes by ``save_episodes_npz`` (or None)."""
+    data = np.load(path, allow_pickle=True)
+    if "spec_state_dim" not in data.files:
+        return None
+    return ObsSpec(
+        obs_dim=int(data["spec_obs_dim"]),
+        goal_dim=int(data["spec_goal_dim"]),
+        state_dim=int(data["spec_state_dim"]),
+        action_dim=int(data["spec_action_dim"]),
+        is_goal_env=bool(data["spec_is_goal_env"]),
+    )
+
+
 def load_episodes_npz(path) -> list[Episode]:
     """Load pre-collected trajectories (e.g. from an RL teacher) saved as object
     arrays of per-episode ``states``/``actions`` — used for tasks with no scripted

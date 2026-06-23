@@ -201,6 +201,7 @@ class JEPAMPCPolicy(
         policy_proposal_fraction: float = 0.0,
         open_loop: bool = False,
         replan_window: int = 0,
+        object_present_idx: int | None = None,
     ) -> None:
         self.name = f"jepa_mpc_{method}_{score_mode}"
         if action_l2_weight > 0.0 or action_delta_weight > 0.0 or execute_smoothing > 0.0:
@@ -242,6 +243,10 @@ class JEPAMPCPolicy(
         self.scripted_gain = scripted_gain
         self.scripted_controller = scripted_controller
         self.policy_net = policy_net
+        # Index of the ``object_present`` flag in the (canonical multi-task)
+        # state; lets the manip score gate grasp/reach terms off for reach. None
+        # for single-task models (flag absent), where every term stays active.
+        self.object_present_idx = object_present_idx
         self.policy_proposal_fraction = float(np.clip(policy_proposal_fraction, 0.0, 1.0))
         if policy_net is not None and policy_proposal_fraction > 0.0:
             self.name = f"{self.name}_policy{int(round(policy_proposal_fraction * 100))}"

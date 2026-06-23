@@ -20,6 +20,8 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 - `jepa_robotics/sb3_jepa.py` — `JEPALatentExtractor` (HER on latent), `JEPAEncoderExtractor`/`JEPAConcatExtractor`
   (trainable encoder), `JEPALatentObsWrapper`.
 - `jepa_robotics/tasks.py` — `TASKS` dict (Fetch / slide / PointMaze / AntMaze / Adroit).
+- Roadmap-B scripts (unified Fetch controller): `collect_fetch_multi.py` (canonical union →npz),
+  `eval_fetch_multi.py` (per-task success for one model+policy), `train_eval_multi.sh` (full pipeline).
 - Key scripts: `train_jepa_sb3_policy.py` (TQC+HER on latent; `--demo-npz` offline seeding),
   `train_adroit_*.py` (teacher / reward-head / controller), `minari_to_npz.py` (D4RL→Episode npz),
   `eval_hjepa_maze.py` (Hierarchical-JEPA subgoal graph), `eval_wm_rollout.py` (WM accuracy probe),
@@ -37,10 +39,12 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 | base | FetchReach-v4 | JEPA+MPC (grad, state) | 95–100% |
 | base | FetchPush-v4 | JEPA policy + CEM | 100% |
 | base | FetchPickAndPlace-v4 | JEPA policy + CEM (manip) | 100% |
+| base | **fetch_multi (one model+policy: reach+push+pick)** | unified JEPA policy+MPC (canonical adapter) | **1.00 / 0.97 / 1.00** (mean 0.99) |
 | 1 | FetchSlide-v4 | JEPA-latent TQC+HER | 0.83 |
 | 2 | PointMaze U/Med/Large | **H-JEPA** (subgoal graph) | 1.00 / 0.90 / 1.00 |
 | 2 | AntMaze UMaze | H-JEPA (BC low-level) | 0.93 |
-| 2 | AntMaze Medium/Large | H-JEPA (uncapping low-level) | in progress |
+| 2 | AntMaze Medium | H-JEPA (control-aware TD3+BC low) | 0.27 (0.00→0.27; walker-capped) |
+| 2 | AntMaze Large | H-JEPA | low (walker-capped) |
 | 3 | Adroit Door/Hammer/Pen/Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
 | 4 | FrankaKitchen-v1 | **control-aware-JEPA skill-hierarchy + online self-imitation** | **0.90 full-4 success** (3.88/4 sub-tasks) |
 
@@ -232,7 +236,20 @@ training the high level.
 - **Roadmap C (Hierarchical JEPA):** ✅ demonstrated — `eval_hjepa_maze.py` beats flat on every maze
   (PointMaze 1.0/0.9/1.0, AntMaze UMaze 0.93). High level = data-driven **subgoal graph** (landmarks +
   empirical k-step reachability → routes around walls) + Dijkstra; low level = goal-conditioned HER/BC policy.
-- **Roadmap B (unified Fetch controller):** not attempted.
+- **Roadmap B (unified Fetch controller):** ✅ done — ONE world model + ONE policy
+  solve reach+push+pick at **1.00 / 0.97 / 1.00** (mean 0.99), matching the per-task
+  specialists with no regression. Built exactly per the design: a **canonical state
+  adapter** (`envs.py::CanonicalFetchWrapper`, `make_env(canonical_task=...)`) maps every
+  Fetch env into one 35-D superset state `[25-D superset obs (object fields zeroed for
+  reach) ⊕ object_present ⊕ task one-hot(3) ⊕ achieved ⊕ desired]`; a **union collector**
+  (`data.py::collect_fetch_multi_episodes`, `scripts/collect_fetch_multi.py`) samples a
+  sub-task per episode and saves the canonical ObsSpec into the npz; **`train.py` /
+  `train_policy.py` read that spec via `load_spec_npz`** (`--episodes-npz`, backward-compatible);
+  the **manip score gates grasp/reach/align by `object_present`** (`JEPAMPCPolicy.object_present_idx`,
+  `CANONICAL_OBJECT_PRESENT_IDX`) so reach ignores the absent object and per-sub-task reach
+  weight differs (push 0.0, pick 0.1). `scripts/eval_fetch_multi.py` reports per-task success;
+  `scripts/train_eval_multi.sh` orchestrates collect→WM→policy→eval. Artifacts:
+  `runs/fetch_multi/fetch_multi_{model,policy}.pt` + `fetch_multi_{reach,push,pick}_*.mp4`.
 
 # Active work — Tier 5 (ShadowHand) is the remaining frontier
 
@@ -240,8 +257,22 @@ Tiers 1–4 are cleared (Kitchen Tier-4 solved at SOTA — see above). The Kitch
 + action-chunked flow policy + subtask skill-hierarchy + DAgger self-imitation) is the template for the
 remaining contact-rich tiers. **Tier 5 (Shadow Dexterous Hand in-hand manipulation)** is the ultimate target:
 20-DoF, near-chaotic contact, SO(3) rotation goals — needs the upgraded stack plus an SO(3)-aware goal metric
-and likely a stochastic/RSSM latent. Loose ends: AntMaze Medium/Large remain locomotion-capped (~0.25–0.30,
-the offline-BC ant walker is weak; genuinely hard offline benchmarks where 1.0 isn't realistic).
+and likely a stochastic/RSSM latent.
+
+**AntMaze (Medium/Large) — diagnosed + improved, but walker-capped (not SOTA).** Prior "0.25–0.30" was
+optimistic; real Medium was ~0 (weak BC low-levels + a PointMaze-scale `reach_radius` bug in eval). Fixed
+the reach scale, and the bottleneck is now pinned: the **navigation/hierarchy is fine** (the agent follows
+11/12 subgoal waypoints around the maze) but the **offline-learned ant gait falls/stalls ~half the time**,
+which caps chained success at ~0.27 (Medium). Tried 8 low-level recipes: latent BC/BC+HER (~0.06), latent
+TD3+BC (0.25), **control-aware (inverse-dynamics) latent TD3+BC (0.27, best)**, latent IQL (0.10, critic
+collapsed→AWR≈BC), raw-obs IQL (0.04–0.08, AWR over-peaked), raw-obs TD3+BC (0.00 — the JEPA latent's
+features actually *help* the small MLP policy). New code: `scripts/train_gcrl_raw.py` (raw goal-conditioned
+IQL), `--raw` mode in `train_offline_td3bc.py`, and **`scripts/eval_hjepa2.py` — a PROPER two-tier H-JEPA**
+(learned high-level JEPA-2 feasibility model over the abstract latent + directed A* search/pruning, replacing
+the empirical-reachability Dijkstra graph; matches the graph at 0.23, confirming the planner is not the
+ceiling). Video: `runs/antmaze_medium/videos/antmaze_medium_hjepa.mp4`. The remaining lever for real SOTA
+(~0.7 medium) is a robust offline-RL *walker* (e.g. a properly-tuned/recurrent or action-chunked locomotion
+policy that doesn't fall) — a larger effort. UMaze (0.93, graph low-level) is the working showcase.
 
 # Infra note
 GPU control node `watgpu208` has a broken SLURM GPU cgroup (`/dev/nvidia-uvm` PermissionError → `cuInit`

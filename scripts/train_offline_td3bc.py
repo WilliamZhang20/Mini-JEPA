@@ -117,6 +117,10 @@ def main() -> None:
     p.add_argument("--noise-clip", type=float, default=0.5)
     p.add_argument("--policy-delay", type=int, default=2)
     p.add_argument("--her-frac", type=float, default=0.8)
+    p.add_argument("--raw", action="store_true",
+                   help="Act on the raw normalized observation instead of the JEPA latent. The raw obs "
+                        "carries the exact (maze) position the critic needs; the predictive latent smears "
+                        "it, which caps the AntMaze walker.")
     p.add_argument("--non-goal", action="store_true",
                    help="Non-goal env (FrankaKitchen): use the stored dataset reward, no HER/compute_reward.")
     p.add_argument("--device", default="cuda")
@@ -154,7 +158,12 @@ def main() -> None:
             out.append(wm.encode(torch.from_numpy(arr[i:i + 16384]).to(dev)))
         return torch.cat(out, 0)
 
-    Z = enc(S); Z2 = enc(S2)
+    if args.raw:
+        # Use the normalized observation directly as the representation.
+        latent_dim = S.shape[1]
+        Z = torch.from_numpy(S).to(dev); Z2 = torch.from_numpy(S2).to(dev)
+    else:
+        Z = enc(S); Z2 = enc(S2)
     At = torch.from_numpy(A).to(dev); Rt = torch.from_numpy(R).to(dev); Dt = torch.from_numpy(D).to(dev)
 
     actor = GoalConditionedPolicy(latent_dim=latent_dim, action_dim=spec.action_dim, hidden_dim=args.hidden).to(dev)
@@ -201,7 +210,8 @@ def main() -> None:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"policy": actor.state_dict(),
-                "config": {"latent_dim": latent_dim, "action_dim": spec.action_dim, "hidden_dim": args.hidden}},
+                "config": {"latent_dim": latent_dim, "action_dim": spec.action_dim,
+                           "hidden_dim": args.hidden, "raw": bool(args.raw)}},
                args.out)
     print(json.dumps({"event": "td3bc_saved", "path": str(args.out)}), flush=True)
 

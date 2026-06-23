@@ -84,16 +84,17 @@ def main() -> None:
     print(json.dumps({"event": "policy_config", "task": task.name, **vars(args)}, default=str), flush=True)
 
     if args.episodes_npz is not None:
-        # Tier-3 path: behaviour-clone directly from pre-collected RL-teacher
-        # trajectories (same npz the world model trained on). No scripted expert.
-        from .data import load_episodes_npz
+        # Behaviour-clone directly from pre-collected trajectories: an RL teacher
+        # (Adroit) OR the canonical multi-task Fetch union (Roadmap B). Prefer the
+        # spec saved in the npz (canonical 35-D state) over any single env's spec.
+        from .data import load_episodes_npz, load_spec_npz
 
         env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
-        spec = obs_spec_from_env(env)
+        spec = load_spec_npz(args.episodes_npz) or obs_spec_from_env(env)
         env.close()
         episodes = load_episodes_npz(args.episodes_npz)
         print(json.dumps({"event": "loaded_episodes_npz", "path": str(args.episodes_npz),
-                          "episodes": len(episodes)}), flush=True)
+                          "episodes": len(episodes), "state_dim": spec.state_dim}), flush=True)
     elif args.teacher_sb3_path is None:
         env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
         episodes, _ = collect_episodes(

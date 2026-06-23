@@ -41,6 +41,19 @@ TASKS = {
         max_episode_steps=100,
         horizons="1,2,4,8,16",
     ),
+    # Roadmap B — ONE world model + ONE policy for reach + push + pick-and-place.
+    # Not a single env: data is the canonical union (collect_fetch_multi.py) and
+    # eval runs each sub-task through the canonical adapter (eval_fetch_multi.py).
+    # env_id is a representative Fetch env (only used as a slug/placeholder);
+    # controller="multi" signals the unified setup.
+    "fetch_multi": TaskConfig(
+        name="fetch_multi",
+        env_id="FetchPickAndPlace-v4",
+        slug="fetch_multi",
+        controller="multi",
+        max_episode_steps=100,
+        horizons="1,2,4,8,16",
+    ),
     "fetch_slide": TaskConfig(
         name="fetch_slide",
         env_id="FetchSlide-v4",
