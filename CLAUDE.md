@@ -49,7 +49,7 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 | 2 | PointMaze U/Med/Large | **H-JEPA** (subgoal graph) | 1.00 / 0.90 / 1.00 |
 | 2 | AntMaze UMaze | H-JEPA (BC low-level) | 0.93 |
 | 2 | AntMaze Medium-Diverse | **HIQL (hierarchical IQL on raw⊕JEPA rep)** | **0.77** (SOTA range; 0.27 wall → 0.77, ~2.85×; raw-only ablation 0.38) |
-| 2 | AntMaze Large-Diverse | HIQL (control-aware raw⊕JEPA rep) | in progress |
+| 2 | AntMaze Large-Diverse | **HIQL (control-aware raw⊕JEPA rep)** | **0.54** (strong; beats IQL ~0.45; 50-ep peak 0.66) |
 | 3 | Adroit Door/Hammer/Pen/Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
 | 4 | FrankaKitchen-v1 | **control-aware-JEPA skill-hierarchy + online self-imitation** | **0.90 full-4 success** (3.88/4 sub-tasks) |
 
