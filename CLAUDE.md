@@ -297,7 +297,13 @@ both walker-capped, so the *planner is solved, not the bottleneck*; **(3) compou
 error** (true GT chain RMSE 0.89/1.49/2.12/2.75 at depth 1/2/3/4) kills deep
 rollouts — K=1/2/4 -> 0.27/0.17/0.07, the low-level predictor's failure mode one
 level up. Bonus: `train_online_td3_her.py` (offline->online TD3+HER warm-started
-from the 0.27 walker) attempts to break the walker ceiling.
+from the 0.27 walker) — NEGATIVE: degraded to 0.16 (critic collapses, online RL
+drifts the gait worse). Final walker tally (~13 methods): offline control-aware
+TD3+BC (0.27) is best; BC/IQL/raw/chunk-BC/flow/online all <= it. The robust
+offline antmaze walker is a genuine wall in this codebase; SOTA (~0.7) was not
+reached. What IS solved: navigation, the proper two-tier H-JEPA architecture, the
+learned-high-level generalization, and the diagnosis that the walker (not the
+planner/encoder) is the ceiling.
 
 # Infra note
 GPU control node `watgpu208` has a broken SLURM GPU cgroup (`/dev/nvidia-uvm` PermissionError → `cuInit`
