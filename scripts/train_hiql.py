@@ -151,6 +151,12 @@ def main() -> None:
     v_opt = torch.optim.Adam(V.parameters(), lr=args.lr)
     l_opt = torch.optim.Adam(pil.parameters(), lr=args.lr)
     h_opt = torch.optim.Adam(pih.parameters(), lr=args.lr)
+    # cosine LR decay -> stabilizes late training (the success curve's late-run
+    # oscillation came from a constant LR + aggressive AWR drifting the policies).
+    scheds = [torch.optim.lr_scheduler.CosineAnnealingLR(o, args.steps) for o in (v_opt, l_opt, h_opt)]
+
+    def clip(mod):
+        torch.nn.utils.clip_grad_norm_(mod.parameters(), 1.0)
 
     def sample_goals(idx):
         # future index within the same episode (>= idx+1), clamped
@@ -205,7 +211,7 @@ def main() -> None:
             tgt = r + args.gamma * (1 - reached) * Vt(REP2[idx], g)
         v = V(REP[idx], g)
         v_loss = expectile_loss(tgt - v, args.expectile)
-        v_opt.zero_grad(); v_loss.backward(); v_opt.step()
+        v_opt.zero_grad(); v_loss.backward(); clip(V); v_opt.step()
         with torch.no_grad():
             for pt, ps in zip(Vt.parameters(), V.parameters()):
                 pt.mul_(1 - args.tau).add_(args.tau * ps)
@@ -216,7 +222,7 @@ def main() -> None:
         pred_a = pil(REP[idx], g)
         a_unit = (ACT[idx] - torch.as_tensor(a_lo, device=dev)) / torch.as_tensor(a_hi - a_lo, device=dev) * 2 - 1
         l_loss = (w_l * (pred_a - a_unit).pow(2).mean(-1)).mean()
-        l_opt.zero_grad(); l_loss.backward(); l_opt.step()
+        l_opt.zero_grad(); l_loss.backward(); clip(pil); l_opt.step()
         # ---- high-level AWR: clone subgoal offset (ach_{t+k}-ach_t) toward a far goal ----
         sub_idx = torch.minimum(idx + args.subgoal_k, EPEND[idx])
         gf = sample_goals(idx)  # far goal (reuse hindsight sampler)
@@ -226,7 +232,9 @@ def main() -> None:
         pred_off = pih(REP[idx], gf)
         target_off = ACH[sub_idx] - ACH[idx]
         h_loss = (w_h * (pred_off - target_off).pow(2).mean(-1)).mean()
-        h_opt.zero_grad(); h_loss.backward(); h_opt.step()
+        h_opt.zero_grad(); h_loss.backward(); clip(pih); h_opt.step()
+        for s in scheds:
+            s.step()
 
         if step % 10000 == 0:
             print(json.dumps({"event": "hiql", "step": step, "v_loss": round(float(v_loss), 4),
