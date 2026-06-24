@@ -26,6 +26,11 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
   `train_adroit_*.py` (teacher / reward-head / controller), `minari_to_npz.py` (D4RL→Episode npz),
   `eval_hjepa_maze.py` (Hierarchical-JEPA subgoal graph), `eval_wm_rollout.py` (WM accuracy probe),
   `train_eval_antmaze_hjepa.slurm` / `uncap_antmaze_hjepa.slurm`.
+- AntMaze SOTA (HIQL): `train_hiql.py` (Hierarchical IQL — one goal-cond. value + high/low AWR policies on
+  rep=[raw obs ⊕ JEPA latent]; `--raw-only` ablation), `eval_hiql.py`, `hiql_medium.slurm` (tuned: beta=1,
+  cosine-LR-decay+grad-clip, best-checkpoint). Also the proper two-tier H-JEPA: `train_hjepa_hwm.py` +
+  `eval_hjepa_hwm.py` (learned macro world model + CEM/A* planning); `train_gcrl_raw.py`,
+  `train_chunked_walker.py`, `train_flow_walker.py`, `train_online_td3_her.py` (walker attempts, all ≤0.27).
 
 ## Environment / run notes
 - Conda env `myenv`; `MUJOCO_GL=egl`; H200 GPU (`--device cuda`). `gymnasium-robotics>=1.2`, action space is
@@ -43,8 +48,8 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 | 1 | FetchSlide-v4 | JEPA-latent TQC+HER | 0.83 |
 | 2 | PointMaze U/Med/Large | **H-JEPA** (subgoal graph) | 1.00 / 0.90 / 1.00 |
 | 2 | AntMaze UMaze | H-JEPA (BC low-level) | 0.93 |
-| 2 | AntMaze Medium | H-JEPA (control-aware TD3+BC low) | 0.27 (0.00→0.27; walker-capped) |
-| 2 | AntMaze Large | H-JEPA | low (walker-capped) |
+| 2 | AntMaze Medium-Diverse | **HIQL (hierarchical IQL on raw⊕JEPA rep)** | **0.77** (SOTA range; 0.27 wall → 0.77, ~2.85×; raw-only ablation 0.38) |
+| 2 | AntMaze Large-Diverse | HIQL (control-aware raw⊕JEPA rep) | in progress |
 | 3 | Adroit Door/Hammer/Pen/Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
 | 4 | FrankaKitchen-v1 | **control-aware-JEPA skill-hierarchy + online self-imitation** | **0.90 full-4 success** (3.88/4 sub-tasks) |
 

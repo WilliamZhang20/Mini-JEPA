@@ -30,6 +30,7 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=20000)
     p.add_argument("--record-out", type=Path, default=None)
     p.add_argument("--record-tries", type=int, default=15)
+    p.add_argument("--record-n", type=int, default=1, help="number of successful episodes to concatenate")
     p.add_argument("--device", default="cpu")
     args = p.parse_args()
 
@@ -73,14 +74,20 @@ def main() -> None:
 
     if args.record_out is not None:
         import imageio.v2 as imageio
+        clip, got = [], 0
         for i in range(args.record_tries):
             s, frames = run(args.seed + 1000 + i, render=True)
             if s > 0.5 and frames:
-                args.record_out.parent.mkdir(parents=True, exist_ok=True)
-                imageio.mimsave(args.record_out, frames[::2], fps=30, format="FFMPEG")
-                print(json.dumps({"event": "recorded", "path": str(args.record_out), "try": i}), flush=True)
-                return
-        print(json.dumps({"event": "no_success_to_record"}), flush=True)
+                clip.extend(frames[::2]); got += 1
+                if got >= args.record_n:
+                    break
+        if clip:
+            args.record_out.parent.mkdir(parents=True, exist_ok=True)
+            imageio.mimsave(args.record_out, clip, fps=30, format="FFMPEG")
+            print(json.dumps({"event": "recorded", "path": str(args.record_out),
+                              "episodes": got, "frames": len(clip)}), flush=True)
+        else:
+            print(json.dumps({"event": "no_success_to_record"}), flush=True)
 
 
 if __name__ == "__main__":
