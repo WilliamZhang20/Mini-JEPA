@@ -98,6 +98,9 @@ def main() -> None:
     p.add_argument("--p-rand", type=float, default=0.3, help="prob the goal is a random state (cross-traj)")
     p.add_argument("--eval-episodes", type=int, default=50)
     p.add_argument("--eval-every", type=int, default=100000)
+    p.add_argument("--raw-only", action="store_true",
+                   help="ABLATION: rep(s) = normalized raw obs only (drop the JEPA latent), to quantify "
+                        "how much the JEPA representation contributes vs raw obs.")
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
 
@@ -128,7 +131,7 @@ def main() -> None:
     nstate = np.concatenate([states[1:], states[-1:]], 0)
     nach = np.concatenate([ach[1:], ach[-1:]], 0)
     Ntot = len(states)
-    print(json.dumps({"event": "hiql_data", "transitions": Ntot, "rep": "raw+latent"}), flush=True)
+    print(json.dumps({"event": "hiql_data", "transitions": Ntot, "rep": ("raw_only" if args.raw_only else "raw+latent")}), flush=True)
 
     Sn = norm.encode(states); Nn = norm.encode(nstate)
     with torch.no_grad():
@@ -136,7 +139,7 @@ def main() -> None:
             reps = []
             for i in range(0, len(arr), 16384):
                 a = torch.from_numpy(arr[i:i + 16384]).to(dev)
-                reps.append(torch.cat([a, wm.encode(a)], dim=1))
+                reps.append(a if args.raw_only else torch.cat([a, wm.encode(a)], dim=1))
             return torch.cat(reps, 0)
         REP = rep_of(Sn); REP2 = rep_of(Nn)
     rep_dim = REP.shape[1]
@@ -182,7 +185,7 @@ def main() -> None:
             while not (term or trunc):
                 sa = norm.encode(flatten_obs(obs))
                 r = torch.from_numpy(sa).unsqueeze(0).to(dev)
-                rep = torch.cat([r, wm.encode(r)], dim=1)
+                rep = r if args.raw_only else torch.cat([r, wm.encode(r)], dim=1)
                 cur = torch.as_tensor(obs["achieved_goal"], dtype=torch.float32, device=dev).unsqueeze(0)
                 if t % args.subgoal_k == 0:
                     sg = cur + pih(rep, goal)            # high level proposes a waypoint
@@ -196,7 +199,7 @@ def main() -> None:
     def save_to(path):
         torch.save({"V": V.state_dict(), "pi_low": pil.state_dict(), "pi_high": pih.state_dict(),
                     "config": {"rep_dim": rep_dim, "goal_dim": spec.goal_dim, "action_dim": spec.action_dim,
-                               "hidden": args.hidden, "subgoal_k": args.subgoal_k}}, path)
+                               "hidden": args.hidden, "subgoal_k": args.subgoal_k, "raw_only": bool(args.raw_only)}}, path)
 
     best_sr = -1.0
     best_path = args.out.with_name(args.out.stem + "_best.pt")
@@ -251,7 +254,7 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"V": V.state_dict(), "pi_low": pil.state_dict(), "pi_high": pih.state_dict(),
                 "config": {"rep_dim": rep_dim, "goal_dim": spec.goal_dim, "action_dim": spec.action_dim,
-                           "hidden": args.hidden, "subgoal_k": args.subgoal_k}},
+                           "hidden": args.hidden, "subgoal_k": args.subgoal_k, "raw_only": bool(args.raw_only)}},
                args.out)
     sr = evaluate(args.eval_episodes)
     print(json.dumps({"event": "hiql_final", "path": str(args.out), "success_rate": round(sr, 4)}), flush=True)

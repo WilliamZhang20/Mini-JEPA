@@ -37,6 +37,7 @@ def main() -> None:
     dev = torch.device(args.device)
     wm, norm, spec, _ = load_jepa_artifact(args.model_path, dev)
     art = torch.load(args.hiql, map_location=dev, weights_only=False); c = art["config"]
+    raw_only = bool(c.get("raw_only", False))
     pil = PiLow(c["rep_dim"], c["goal_dim"], c["action_dim"], c["hidden"]).to(dev); pil.load_state_dict(art["pi_low"]); pil.eval()
     pih = PiHigh(c["rep_dim"], c["goal_dim"], c["hidden"]).to(dev); pih.load_state_dict(art["pi_high"]); pih.eval()
     k = c["subgoal_k"]
@@ -54,7 +55,7 @@ def main() -> None:
             f = e.render();  frames.append(f) if f is not None else None
         while not (term or trunc):
             r = torch.from_numpy(norm.encode(flatten_obs(obs))).unsqueeze(0).to(dev)
-            rep = torch.cat([r, wm.encode(r)], dim=1)
+            rep = r if raw_only else torch.cat([r, wm.encode(r)], dim=1)
             cur = torch.as_tensor(obs["achieved_goal"], dtype=torch.float32, device=dev).unsqueeze(0)
             if t % k == 0:
                 sg = cur + pih(rep, goal)

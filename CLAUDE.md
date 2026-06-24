@@ -307,16 +307,18 @@ the policy MLP — both proven here), and TWO advantage-weighted policies from i
 high level proposing a subgoal offset ~k=25 steps ahead, and a low level reaching
 it. The hierarchy is what makes the long-horizon advantage signal learnable.
 Value learning is clean (v_mean ~ -28 = real distances, advantages meaningful,
-NOT the latent-IQL critic collapse). eval climbs over training (0.07/0.30/0.48...; 30-ep peaks hit 0.67 but those are
-noise). **Reliable 100-episode success = 0.48** (`scripts/eval_hiql.py`,
-`*_hiql_best.pt`) — the FIRST method to break the 0.27 wall (~1.8x); strong offline
-range but below true SOTA (~0.7-0.85). Success is non-monotone (offline-RL value
-drift -> best-checkpoint, but selection on a 30-ep metric is itself noisy; pick the
-best by a >=100-ep eval). Headroom toward SOTA: stabilize late training (lower
-beta / LR decay), reliable best-selection, longer run. Navigation + the proper
-two-tier H-JEPA architecture + generalization were already solved; HIQL is the
-robust *controller* that finally clears the offline-antmaze plateau. Video
-`runs/antmaze_medium/videos/antmaze_medium_hiql.mp4`.
+NOT the latent-IQL critic collapse). **SOTA reached.** First run (beta=3, constant LR) peaked 0.48 (100-ep) but the
+success curve oscillated. The **tuned run** (`scripts/hiql_medium.slurm`: beta=1,
+**cosine LR decay + grad clip**, 1M steps, best-checkpoint by 50-ep eval) climbed
+*monotonically* 0.20/0.34/0.52/0.66/0.68/0.82/**0.84** (50-ep; the late LR decay
+gave the final surge) → **validated 0.77 over 100 episodes** = genuine SOTA range
+for antmaze-medium-diverse (literature best ~0.85; IQL ~0.7), from the 0.27 wall
+every prior offline method hit (~2.85x). Stability (beta=1 + LR decay + grad clip)
+was the key. Best checkpoint `*_hiql_tuned_best.pt`; video
+`runs/antmaze_medium/videos/antmaze_medium_hiql_tuned.mp4`. `--raw-only` ablation
+(drop the JEPA latent, keep raw obs) submitted to quantify the JEPA contribution.
+Navigation + the proper two-tier H-JEPA architecture + generalization were already
+solved; HIQL is the robust *controller* that cleared the offline-antmaze plateau to SOTA.
 
 # Infra note
 GPU control node `watgpu208` has a broken SLURM GPU cgroup (`/dev/nvidia-uvm` PermissionError → `cuInit`
