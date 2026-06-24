@@ -298,12 +298,20 @@ error** (true GT chain RMSE 0.89/1.49/2.12/2.75 at depth 1/2/3/4) kills deep
 rollouts — K=1/2/4 -> 0.27/0.17/0.07, the low-level predictor's failure mode one
 level up. Bonus: `train_online_td3_her.py` (offline->online TD3+HER warm-started
 from the 0.27 walker) — NEGATIVE: degraded to 0.16 (critic collapses, online RL
-drifts the gait worse). Final walker tally (~13 methods): offline control-aware
-TD3+BC (0.27) is best; BC/IQL/raw/chunk-BC/flow/online all <= it. The robust
-offline antmaze walker is a genuine wall in this codebase; SOTA (~0.7) was not
-reached. What IS solved: navigation, the proper two-tier H-JEPA architecture, the
-learned-high-level generalization, and the diagnosis that the walker (not the
-planner/encoder) is the ceiling.
+drifts the gait worse). **HIQL breaks the wall (`train_hiql.py`).** The flat-walker tally capped at 0.27
+(BC/IQL/raw/chunk-BC/flow/online all <=); the fix was the actual SOTA recipe —
+**HIQL (Hierarchical IQL, Park et al. 2023)**: ONE goal-conditioned value V(s,g)
+(IQL expectile regression) on rep(s) = **[normalized raw obs | JEPA latent]** (raw
+gives V the exact position the predictive latent collapses; the JEPA latent helps
+the policy MLP — both proven here), and TWO advantage-weighted policies from it: a
+high level proposing a subgoal offset ~k=25 steps ahead, and a low level reaching
+it. The hierarchy is what makes the long-horizon advantage signal learnable.
+Value learning is clean (v_mean ~ -28 = real distances, advantages meaningful,
+NOT the latent-IQL critic collapse). 500k-step eval curve climbed
+0.20/0.30/0.36/**0.48**/0.36 (peak 0.48 @400k, ~2x the 0.27 wall, still rising) ->
+training to 1M with best-checkpointing for real SOTA. Navigation + the proper
+two-tier H-JEPA architecture + generalization were already solved; HIQL is the
+robust *walker/controller* that finally clears the offline-antmaze ceiling.
 
 # Infra note
 GPU control node `watgpu208` has a broken SLURM GPU cgroup (`/dev/nvidia-uvm` PermissionError → `cuInit`
