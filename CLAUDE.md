@@ -307,11 +307,16 @@ the policy MLP — both proven here), and TWO advantage-weighted policies from i
 high level proposing a subgoal offset ~k=25 steps ahead, and a low level reaching
 it. The hierarchy is what makes the long-horizon advantage signal learnable.
 Value learning is clean (v_mean ~ -28 = real distances, advantages meaningful,
-NOT the latent-IQL critic collapse). 500k-step eval curve climbed
-0.20/0.30/0.36/**0.48**/0.36 (peak 0.48 @400k, ~2x the 0.27 wall, still rising) ->
-training to 1M with best-checkpointing for real SOTA. Navigation + the proper
+NOT the latent-IQL critic collapse). eval climbs over training (0.07/0.30/0.48...; 30-ep peaks hit 0.67 but those are
+noise). **Reliable 100-episode success = 0.48** (`scripts/eval_hiql.py`,
+`*_hiql_best.pt`) — the FIRST method to break the 0.27 wall (~1.8x); strong offline
+range but below true SOTA (~0.7-0.85). Success is non-monotone (offline-RL value
+drift -> best-checkpoint, but selection on a 30-ep metric is itself noisy; pick the
+best by a >=100-ep eval). Headroom toward SOTA: stabilize late training (lower
+beta / LR decay), reliable best-selection, longer run. Navigation + the proper
 two-tier H-JEPA architecture + generalization were already solved; HIQL is the
-robust *walker/controller* that finally clears the offline-antmaze ceiling.
+robust *controller* that finally clears the offline-antmaze plateau. Video
+`runs/antmaze_medium/videos/antmaze_medium_hiql.mp4`.
 
 # Infra note
 GPU control node `watgpu208` has a broken SLURM GPU cgroup (`/dev/nvidia-uvm` PermissionError → `cuInit`
