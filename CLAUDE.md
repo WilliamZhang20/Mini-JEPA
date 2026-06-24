@@ -283,6 +283,22 @@ The genuine SOTA path is therefore the full kitchen stack adapted to a goal-cond
 documented as the next effort. Net: AntMaze navigation/architecture are solved (proper two-tier H-JEPA +
 both A* and CEM planners); the robust offline *walker* is the unbroken wall.
 
+**Proper HWM high level (literature two-tier JEPA, `train_hjepa_hwm.py` +
+`eval_hjepa_hwm.py`).** Strictly on top of the frozen low level: a high encoder
+psi (192->16 abstract latent), a GRU macro-action encoder, a macro-step predictor
+g(z_high, macro)->z_high at +N trained with the JEPA recipe (stop-grad target +
+VICReg + normalized-MSE), and a decoder (abstract->achieved_goal position).
+Planning is **CEM over continuous macro-actions through g** (one level up), not
+Dijkstra. The three experiments (all confirmed): **(1) g generalizes** — held-out
+macro-prediction err 0.0028, **100% landmark-pair coverage vs the empirical table's
+12.2%** (the real generalization win); **(2) at K=1 (single macro-hop) HWM-CEM
+matches Dijkstra (0.27=0.27)** — the learned continuous planner is competitive,
+both walker-capped, so the *planner is solved, not the bottleneck*; **(3) compounding
+error** (true GT chain RMSE 0.89/1.49/2.12/2.75 at depth 1/2/3/4) kills deep
+rollouts — K=1/2/4 -> 0.27/0.17/0.07, the low-level predictor's failure mode one
+level up. Bonus: `train_online_td3_her.py` (offline->online TD3+HER warm-started
+from the 0.27 walker) attempts to break the walker ceiling.
+
 # Infra note
 GPU control node `watgpu208` has a broken SLURM GPU cgroup (`/dev/nvidia-uvm` PermissionError → `cuInit`
 fails though `nvidia-smi` works); **route GPU work through `sbatch`**, not the interactive node. Offline
