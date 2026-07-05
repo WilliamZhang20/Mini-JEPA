@@ -28,6 +28,7 @@ from .scoring import (
     ManipScoringMixin,
     StrikeScoringMixin,
 )
+from .subgoals import load_subgoal_artifact, make_latent_subgoal_target_state
 from .tasks import TASKS, resolve_task, task_dir
 
 
@@ -565,6 +566,89 @@ class LearnedPolicyOnly:
         return np.clip(action, env.action_space.low, env.action_space.high)
 
 
+class LatentSubgoalMPCPolicy(JEPAMPCPolicy):
+    """Plan controls to realize demo-derived latent futures through the JEPA dynamics.
+
+    This deliberately does not learn ``state -> action`` from labels. The subgoal
+    artifact stores desirable future states from demonstrations, grounds the next
+    phase target in the current scene, encodes that target with the JEPA encoder,
+    and CEM/gradient planning searches action sequences whose predicted latent
+    rollout reaches that latent future.
+    """
+
+    def __init__(self, *, subgoal_artifact: dict, latent_path_weight: float = 0.15, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.subgoal_artifact = subgoal_artifact
+        self.latent_path_weight = float(latent_path_weight)
+        self.name = f"jepa_latent_subgoal_{self.method}"
+        if self.action_l2_weight > 0.0 or self.action_delta_weight > 0.0 or self.execute_smoothing > 0.0:
+            self.name = f"{self.name}_smooth"
+
+    def _score_action_tensor(
+        self,
+        obs: dict[str, np.ndarray],
+        action_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        raw_state = flatten_obs(obs)
+        _phase, target_state = make_latent_subgoal_target_state(raw_state, self.spec, self.subgoal_artifact)
+        state = torch.from_numpy(self.normalizer.encode(raw_state)).unsqueeze(0).to(self.device)
+        target = torch.from_numpy(self.normalizer.encode(target_state)).unsqueeze(0).to(self.device)
+        z0 = self.model.encode(state).repeat(action_tensor.shape[0], 1)
+        with torch.no_grad():
+            z_target = self.model.encode(target)
+        traj_z = self.model.predict_rollout(z0, action_tensor, self.horizon)
+        latent_std = self.subgoal_artifact.get("latent_std")
+        if latent_std is not None:
+            scale = torch.as_tensor(latent_std, dtype=traj_z.dtype, device=traj_z.device).view(1, 1, -1)
+        else:
+            scale = torch.ones((1, 1, traj_z.shape[-1]), dtype=traj_z.dtype, device=traj_z.device)
+        latent_dist = torch.linalg.norm((traj_z - z_target.unsqueeze(1)) / scale.clamp_min(1e-4), dim=-1)
+        scores = latent_dist[:, -1] + self.latent_path_weight * latent_dist.mean(dim=1)
+        scores = scores + self._action_regularizers(action_tensor)
+        return scores
+
+
+class LatentSubgoalActorPolicy:
+    """Execute an actor trained through JEPA dynamics toward latent subgoals."""
+
+    def __init__(self, *, model, actor, normalizer, spec, subgoal_artifact, device) -> None:
+        self.model = model
+        self.actor = actor
+        self.normalizer = normalizer
+        self.spec = spec
+        self.subgoal_artifact = subgoal_artifact
+        self.device = device
+        self.name = "jepa_latent_subgoal_actor"
+
+    @torch.no_grad()
+    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
+        raw_state = flatten_obs(obs)
+        _phase, target_state = make_latent_subgoal_target_state(raw_state, self.spec, self.subgoal_artifact)
+        state = torch.from_numpy(self.normalizer.encode(raw_state)).unsqueeze(0).to(self.device)
+        target = torch.from_numpy(self.normalizer.encode(target_state)).unsqueeze(0).to(self.device)
+        z = self.model.encode(state)
+        z_goal = self.model.encode(target)
+        action = self.actor(z, z_goal)[0].detach().cpu().numpy().astype(np.float32)
+        return np.clip(action, env.action_space.low, env.action_space.high)
+
+
+def load_latent_subgoal_actor(path: Path, device: torch.device):
+    from .models import LatentSubgoalActor
+
+    artifact = torch.load(path, map_location=device, weights_only=False)
+    cfg = artifact["config"]
+    actor = LatentSubgoalActor(
+        latent_dim=int(cfg["latent_dim"]),
+        action_dim=int(cfg["action_dim"]),
+        hidden_dim=int(cfg["hidden_dim"]),
+    ).to(device)
+    actor.load_state_dict(artifact["actor"])
+    actor.eval()
+    for p in actor.parameters():
+        p.requires_grad_(False)
+    return actor, cfg
+
+
 def load_policy_artifact(path: Path, device: torch.device):
     """Load a saved GoalConditionedPolicy checkpoint into eval mode; returns ``(policy, config)``."""
     from .models import GoalConditionedPolicy
@@ -625,6 +709,7 @@ def load_jepa_artifact(path: Path, device: torch.device):
         residual_prediction=bool(config.get("residual_prediction", False)),
         transition_depth=int(config.get("transition_depth", 1)),
         inverse_dynamics=bool(config.get("inverse_dynamics", False)),
+        inverse_horizon=int(config.get("inverse_horizon", 1)),
     ).to(device)
     state_dict = _remap_legacy_state_dict(
         artifact["model"], str(config.get("predictor_mode", "direct"))
@@ -734,6 +819,20 @@ def make_argparser() -> argparse.ArgumentParser:
                         help="Learned action-prior artifact; used as the MPC proposal and as a stand-alone baseline.")
     parser.add_argument("--policy-proposal-fraction", type=float, default=0.5,
                         help="Fraction of planner candidates seeded from the learned policy rollout.")
+    parser.add_argument(
+        "--subgoal-path",
+        type=Path,
+        default=None,
+        help="Demo-future latent subgoal artifact. Uses JEPA dynamics planning toward encoded latent futures, "
+             "without behaviour-cloning action labels.",
+    )
+    parser.add_argument("--latent-subgoal-path-weight", type=float, default=0.15)
+    parser.add_argument(
+        "--subgoal-actor-path",
+        type=Path,
+        default=None,
+        help="Actor trained through the JEPA world model toward latent subgoals; no action-label BC loss.",
+    )
     parser.add_argument("--action-l2-weight", type=float, default=0.0)
     parser.add_argument("--action-delta-weight", type=float, default=0.0)
     parser.add_argument("--execute-smoothing", type=float, default=0.0)
@@ -810,6 +909,12 @@ def main() -> None:
     policy_net = None
     if args.policy_path is not None:
         policy_net, _ = load_policy_artifact(args.policy_path, device)
+    subgoal_artifact = load_subgoal_artifact(args.subgoal_path) if args.subgoal_path is not None else None
+    subgoal_actor = None
+    if args.subgoal_actor_path is not None:
+        if subgoal_artifact is None:
+            raise ValueError("--subgoal-actor-path requires --subgoal-path for target construction.")
+        subgoal_actor, _ = load_latent_subgoal_actor(args.subgoal_actor_path, device)
 
     policies: list[Policy] = [RandomPolicy()]
     if spec.is_goal_env:
@@ -826,8 +931,18 @@ def main() -> None:
                 model=model, policy_net=policy_net, normalizer=normalizer, spec=spec, device=device
             )
         )
-    policies.append(
-        JEPAMPCPolicy(
+    if subgoal_actor is not None:
+        policies.append(
+            LatentSubgoalActorPolicy(
+                model=model,
+                actor=subgoal_actor,
+                normalizer=normalizer,
+                spec=spec,
+                subgoal_artifact=subgoal_artifact,
+                device=device,
+            )
+        )
+    mpc_kwargs = dict(
             model=model,
             normalizer=normalizer,
             spec=spec,
@@ -859,8 +974,17 @@ def main() -> None:
             policy_proposal_fraction=args.policy_proposal_fraction,
             open_loop=args.open_loop,
             replan_window=args.replan_window,
-        )
     )
+    if subgoal_artifact is not None:
+        policies.append(
+            LatentSubgoalMPCPolicy(
+                subgoal_artifact=subgoal_artifact,
+                latent_path_weight=args.latent_subgoal_path_weight,
+                **mpc_kwargs,
+            )
+        )
+    else:
+        policies.append(JEPAMPCPolicy(**mpc_kwargs))
     sb3_error = None
     if sb3_path is not None:
         try:

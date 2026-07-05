@@ -42,7 +42,7 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 | Tier | Task | Best agent | Success |
 |------|------|-----------|---------|
 | base | FetchReach-v4 | JEPA+MPC (grad, state) | 95–100% |
-| base | FetchPush-v4 | JEPA policy + CEM | 100% |
+| base | FetchPush-v4 | **flow prior + JEPA chunk selection** | 100% |
 | base | FetchPickAndPlace-v4 | JEPA policy + CEM (manip) | 100% |
 | base | **fetch_multi (one model+policy: reach+push+pick)** | unified JEPA policy+MPC (canonical adapter) | **1.00 / 0.97 / 1.00** (mean 0.99) |
 | 1 | FetchSlide-v4 | JEPA-latent TQC+HER | 0.83 |
@@ -53,7 +53,11 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 | 3 | Adroit Door/Hammer/Pen/Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
 | 4 | FrankaKitchen-v1 | **control-aware-JEPA skill-hierarchy + online self-imitation** | **0.90 full-4 success** (3.88/4 sub-tasks) |
 
-Tiers 1–4 essentially cleared. The three recurring lessons (see roadmaps + README):
+Tiers 1–4 essentially cleared. FetchPush is now the clean LeCun-compatible base
+case: demos define local future latents, a flow-matching prior samples plausible
+action chunks conditioned on `(z_t, z_future)`, and JEPA dynamics selects the chunk
+that realizes the future (30/30 success on two eval seeds; mean final distance
+0.008 / 0.011). The three recurring lessons (see roadmaps + README):
 **(a)** JEPA's *encoder/representation* is what carries control (BC/RL/diffusion act in the latent); its
 *predictor* only pays off for planning on **smooth** dynamics (Fetch reach/push, H-JEPA high level),
 not contact-rich (slide/Adroit/kitchen → model exploitation, predictor worse-than-no-op). **(b)** Long-horizon

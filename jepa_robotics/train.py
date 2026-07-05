@@ -109,12 +109,20 @@ def compute_loss(
     else:
         loss_achieved = torch.zeros((), dtype=state.dtype, device=device)
 
-    # Inverse dynamics: predict a_t from (z_t, z_{t+1}) through the ONLINE encoder so
-    # gradients pressure the encoder to keep action-discriminative (control) detail.
+    # Inverse dynamics: predict a_{t:t+k-1} from (z_t, z_{t+k}) through the ONLINE
+    # encoder so gradients pressure the encoder to keep multi-step
+    # action-discriminative (control) detail.
     if getattr(model, "inverse_dynamics", False):
-        z_next = model.encode(future_states[:, 0])
+        inv_horizon = int(getattr(model, "inverse_horizon", 1))
+        if inv_horizon not in horizons:
+            raise ValueError(
+                f"inverse_horizon={inv_horizon} must be present in horizons={horizons}"
+            )
+        inv_idx = horizons.index(inv_horizon)
+        z_next = model.encode(future_states[:, inv_idx])
         inv_pred = model.inverse_head(torch.cat([z, z_next], dim=-1))
-        loss_inverse = F.mse_loss(inv_pred, actions[:, 0])
+        inv_target = actions[:, :inv_horizon].reshape(actions.shape[0], -1)
+        loss_inverse = F.mse_loss(inv_pred, inv_target)
     else:
         loss_inverse = torch.zeros((), dtype=state.dtype, device=device)
 
@@ -250,6 +258,7 @@ def save_model_artifact(path: Path, model, normalizer, spec, args) -> None:
                 "transition_depth": args.transition_depth,
                 "ensemble_heads": args.ensemble_heads,
                 "inverse_dynamics": args.inverse_dynamics,
+                "inverse_horizon": args.inverse_horizon,
             },
         },
         path,
@@ -313,7 +322,13 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda-pred-goal", type=float, default=0.1)
     parser.add_argument("--lambda-pred-cov", type=float, default=0.0)
     parser.add_argument("--inverse-dynamics", action="store_true",
-                        help="add an inverse-dynamics head (a_t from z_t,z_{t+1}) to make the encoder control-aware")
+                        help="add an inverse-dynamics head (action chunk from z_t,z_{t+k}) to make the encoder control-aware")
+    parser.add_argument(
+        "--inverse-horizon",
+        type=int,
+        default=1,
+        help="k for the inverse chunk head. Must be included in --horizons. Use 1 for the legacy single-step head.",
+    )
     parser.add_argument("--lambda-inverse", type=float, default=0.0)
     parser.add_argument("--eval-episodes", type=int, default=3)
     parser.add_argument("--mpc-candidates", type=int, default=128)
@@ -439,6 +454,7 @@ def main() -> None:
         transition_depth=args.transition_depth,
         ensemble_heads=args.ensemble_heads,
         inverse_dynamics=args.inverse_dynamics,
+        inverse_horizon=args.inverse_horizon,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     if resume_artifact is not None:

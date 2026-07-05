@@ -9,7 +9,7 @@ to make Roadmap-A extensions (ensemble heads, stochastic latent) additive.
 
 from .mlp import MLP
 from .world_model import ActionConditionedJEPA
-from .policy import GoalConditionedPolicy
+from .policy import GoalConditionedPolicy, LatentSubgoalActor
 from .regularizers import (
     covariance_regularizer,
     normalized_mse,
@@ -20,6 +20,7 @@ __all__ = [
     "MLP",
     "ActionConditionedJEPA",
     "GoalConditionedPolicy",
+    "LatentSubgoalActor",
     "normalized_mse",
     "variance_regularizer",
     "covariance_regularizer",

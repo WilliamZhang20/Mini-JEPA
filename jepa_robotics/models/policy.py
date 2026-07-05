@@ -24,3 +24,19 @@ class GoalConditionedPolicy(nn.Module):
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         return torch.tanh(self.net(z))
+
+
+class LatentSubgoalActor(nn.Module):
+    """Actor optimized through a frozen world model toward latent subgoals.
+
+    Unlike ``GoalConditionedPolicy``, this module is not trained to copy action
+    labels. Its input is the current JEPA latent and a desired future latent; the
+    training objective lives on the world model's predicted future latent.
+    """
+
+    def __init__(self, *, latent_dim: int, action_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.net = MLP([2 * latent_dim, hidden_dim, hidden_dim, action_dim], layer_norm=True)
+
+    def forward(self, z: torch.Tensor, z_goal: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.net(torch.cat([z, z_goal], dim=-1)))

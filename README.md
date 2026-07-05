@@ -12,7 +12,7 @@ hand:
 
 | Tier | Task(s) | Best agent | Success |
 | --- | --- | --- | ---: |
-| base | FetchReach / Push / PickAndPlace | JEPA + learned policy + MPC | 1.00 / 1.00 / 1.00 |
+| base | FetchReach / Push / PickAndPlace | JEPA MPC / flow-prior+JEPA selection / JEPA policy+MPC | 1.00 / 1.00 / 1.00 |
 | 1 | **FetchSlide** (ballistic strike) | JEPA-latent TQC + HER | 0.83 |
 | 2 | **PointMaze** UMaze / Medium / Large | **Hierarchical JEPA** | 1.00 / 0.90 / 1.00 |
 | 2 | **AntMaze** UMaze (8-DoF ant) | Hierarchical JEPA | 0.93 |
@@ -42,6 +42,10 @@ and why. Two findings recur and are documented in
 - `jepa_robotics/evaluate.py`: compares random actions, a scripted controller,
   the learned policy on its own, and the policy-seeded JEPA+MPC planner. It can
   also record MP4 rollouts.
+- `scripts/train_fetch_flow_prior.py` / `scripts/eval_fetch_flow_jepa.py`: FetchPush's
+  LeCun-compatible replacement controller: a conditional flow proposes action
+  chunks from `(z_t, z_future)`, and JEPA dynamics selects the chunk that realizes
+  the encoded demo/goal future.
 - `jepa_robotics/models/`: the action-conditioned JEPA model (recurrent latent
   dynamics, optional K-head ensemble) and the `GoalConditionedPolicy` action
   prior, split into `world_model.py` / `policy.py` / `mlp.py` / `regularizers.py`.
@@ -448,27 +452,36 @@ The earlier sampling-only planner (no learned policy) reached only ~0.40 success
 on the same model — it never reliably grasped. The jump to 1.00 is entirely from
 adding the learned action prior, not from changing the world model.
 
-**FetchPush-v4** (30 episodes, same pipeline):
+**FetchPush-v4** (30 episodes). Push no longer needs a BC action prior. The
+replacement is a **flow-matching action prior conditioned on `(z_t, z_future)`**:
+demos define local desirable futures, the flow samples plausible 8-step action
+chunks, and the JEPA dynamics model selects the chunk whose rollout best reaches
+the encoded future. Multi-horizon future conditioning (`4,8,12,16`), exact Fetch
+geometry side features, and combined latent+decoded-state scoring close the gap:
 
 | Policy / setup | Success | Mean final distance |
 | --- | ---: | ---: |
 | Random | 0.07 | 0.184 |
 | Scripted controller (conventional reference) | 0.97 | 0.031 |
-| JEPA policy (learned, on latent) | 0.93 | 0.033 |
-| JEPA policy + world-model MPC (reach term off) | **1.00** | **0.014** |
+| Historical JEPA BC policy (learned, on latent) | 0.93 | 0.033 |
+| Historical JEPA BC + world-model MPC (reach term off) | 1.00 | 0.014 |
+| **Flow prior + JEPA chunk selection** | **1.00** | **0.008** |
 
 Push has a task-specific subtlety: a good push contacts the *far* side of the
 object from the goal, so the gripper-to-object "reach" cost actively misleads the
-planner (it pulls the gripper to the object centre). Turning that term off
-(`--manip-reach-weight 0.0`) lets the world-model MPC refine the learned policy's
-push and it beats the scripted controller on both success and precision.
+planner (it pulls the gripper to the object centre). The flow+JEPA version avoids
+copying action labels: `z_t = encoder(o_t)`, `z_future = target_encoder(o_{t+h})`,
+`flow(a_{t:t+7} | z_t, z_future)` proposes chunks, and JEPA rolls out/scored chunks
+online.
 
-## Train The Manipulation Agent (World Model + Policy + MPC)
+## Train The Manipulation Agent
 
 `scripts/train_eval_object_v2.sh` runs the full pipeline for an object task:
-collect data with the scripted expert, train the recurrent JEPA world model,
-behaviour-clone the goal-conditioned policy on its latent, evaluate all four
-policies, and record agent + reference videos.
+collect data with the scripted expert and train the recurrent JEPA world model.
+For `fetch_push`, it trains/evaluates the flow-prior + JEPA-selection replacement.
+For `fetch_pick_place`, it still behaviour-clones the goal-conditioned policy on
+the latent because grasping remains a narrow contact choreography where the flow
+replacement has not matched BC.
 
 ```bash
 TASK_NAME=fetch_pick_place RUN_TAG=pickplace_v2 \
@@ -542,8 +555,9 @@ Outputs are written under `runs/` and ignored by Git.
 
 - `fetch_reach`: goal-conditioned reaching; solved by pure JEPA + MPC (no policy
   needed).
-- `fetch_push`: push an object to a goal on the table. Solved with the world
-  model + learned policy pipeline.
+- `fetch_push`: push an object to a goal on the table. Solved with a
+  flow-matching action-chunk prior conditioned on current/future JEPA latents,
+  with JEPA dynamics selecting the chunk to execute.
 - `fetch_pick_place`: grasp and place, often at a mid-air goal. Solved (1.00
   success) with the world model + learned policy + MPC; sampling-only MPC was
   not enough (see ["A world model is not a controller"](#a-world-model-is-not-a-controller)).

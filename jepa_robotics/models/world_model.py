@@ -24,6 +24,7 @@ class ActionConditionedJEPA(nn.Module):
         transition_depth: int = 1,
         ensemble_heads: int = 1,
         inverse_dynamics: bool = False,
+        inverse_horizon: int = 1,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
@@ -34,6 +35,7 @@ class ActionConditionedJEPA(nn.Module):
         self.residual_prediction = residual_prediction
         self.transition_depth = max(1, transition_depth)
         self.ensemble_heads = max(1, ensemble_heads)
+        self.inverse_horizon = max(1, inverse_horizon)
 
         self.encoder = MLP([state_dim, hidden_dim, hidden_dim, latent_dim], layer_norm=True)
         self.target_encoder = deepcopy(self.encoder)
@@ -86,14 +88,15 @@ class ActionConditionedJEPA(nn.Module):
         # object positions) is what the manipulation-aware planner relies on.
         self.state_probe = MLP([latent_dim, hidden_dim, hidden_dim, state_dim], layer_norm=True)
         self.distance_probe = MLP([latent_dim, hidden_dim, 1])
-        # Inverse-dynamics head a_t = g(z_t, z_{t+1}): predicting the action from a
-        # latent transition forces the encoder to RETAIN the fine, control-relevant
-        # (action-discriminative) detail that VICReg/prediction smoothing otherwise
-        # discards — making the latent useful for contact-rich manipulation control,
-        # not just abstract/navigation tasks.
+        # Inverse-dynamics head a_{t:t+k-1} = g(z_t, z_{t+k}): predicting the
+        # action chunk from a latent transition forces the encoder to retain
+        # control-relevant detail. k=1 preserves the original single-step head.
         self.inverse_dynamics = inverse_dynamics
         if inverse_dynamics:
-            self.inverse_head = MLP([2 * latent_dim, hidden_dim, hidden_dim, action_dim], layer_norm=True)
+            self.inverse_head = MLP(
+                [2 * latent_dim, hidden_dim, hidden_dim, action_dim * self.inverse_horizon],
+                layer_norm=True,
+            )
         self.reset_target()
 
     def reset_target(self) -> None:
