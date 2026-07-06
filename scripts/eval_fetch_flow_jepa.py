@@ -54,6 +54,13 @@ class FlowJEPAChunkPolicy:
         latent_weight: float,
         state_weight: float,
         final_goal_weight: float,
+        grip_weight: float,
+        finger_weight: float,
+        phase_score_weight: float,
+        strike_action_weight: float,
+        refine_iters: int,
+        refine_lr: float,
+        refine_prior_weight: float,
     ) -> None:
         self.name = f"jepa_flow_chunk_select_{goal_mode}_n{candidates}"
         self.wm = wm
@@ -73,6 +80,13 @@ class FlowJEPAChunkPolicy:
         self.latent_weight = latent_weight
         self.state_weight = state_weight
         self.final_goal_weight = final_goal_weight
+        self.grip_weight = grip_weight
+        self.finger_weight = finger_weight
+        self.phase_score_weight = phase_score_weight
+        self.strike_action_weight = strike_action_weight
+        self.refine_iters = refine_iters
+        self.refine_lr = refine_lr
+        self.refine_prior_weight = refine_prior_weight
         self.prev_action = np.zeros(spec.action_dim, dtype=np.float32)
         self.cached: list[np.ndarray] = []
         self.ddpm = make_ddpm(int(flow_ckpt["diffusion_steps"]), device)
@@ -81,17 +95,80 @@ class FlowJEPAChunkPolicy:
         self.prev_action = np.zeros(self.spec.action_dim, dtype=np.float32)
         self.cached = []
 
-    def _target_state(self, raw_state: np.ndarray) -> np.ndarray:
+    def _target_state(self, raw_state: np.ndarray) -> tuple[str, np.ndarray]:
         if self.goal_mode == "local":
             if self.subgoal_artifact is None:
                 raise ValueError("goal_mode=local requires a subgoal artifact")
-            return make_latent_subgoal_target_state(raw_state, self.spec, self.subgoal_artifact)[1]
-        return goal_state_from_state(raw_state, self.spec)
+            return make_latent_subgoal_target_state(raw_state, self.spec, self.subgoal_artifact)
+        return "final", goal_state_from_state(raw_state, self.spec)
+
+    def _phase_scores(
+        self,
+        *,
+        phase: str,
+        raw_state: np.ndarray,
+        target_state: np.ndarray,
+        pred_state: torch.Tensor,
+        action_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        scores = torch.zeros(action_tensor.shape[0], dtype=pred_state.dtype, device=pred_state.device)
+        pred_grip = pred_state[..., :3]
+        target_grip = torch.as_tensor(target_state[:3], dtype=pred_state.dtype, device=pred_state.device).view(1, 1, 3)
+        if self.grip_weight > 0.0:
+            grip_dist = torch.linalg.norm(pred_grip - target_grip, dim=-1)
+            scores = scores + self.grip_weight * (grip_dist[:, -1] + 0.25 * grip_dist.mean(dim=1))
+
+        if self.finger_weight > 0.0 and self.spec.obs_dim >= 11 and self.spec.action_dim >= 4:
+            pred_finger = pred_state[..., 9:11]
+            target_finger = torch.as_tensor(
+                target_state[9:11],
+                dtype=pred_state.dtype,
+                device=pred_state.device,
+            ).view(1, 1, 2)
+            finger_dist = torch.linalg.norm(pred_finger - target_finger, dim=-1)
+            scores = scores + self.finger_weight * (finger_dist[:, -1] + 0.25 * finger_dist.mean(dim=1))
+
+        if self.phase_score_weight <= 0.0:
+            return scores
+
+        kind = self.subgoal_artifact.get("kind") if self.subgoal_artifact is not None else ""
+        if kind == "fetch_pick_latent_subgoals" and self.spec.action_dim >= 4:
+            grip_cmd = action_tensor[..., 3]
+            if phase in {"grasp", "lift", "place"}:
+                # Lower is better: closing commands are negative in Fetch.
+                scores = scores + self.phase_score_weight * F.relu(grip_cmd + 0.15).mean(dim=1)
+            elif phase in {"approach", "pregrasp"}:
+                scores = scores + 0.5 * self.phase_score_weight * F.relu(-grip_cmd).mean(dim=1)
+        elif kind == "fetch_slide_latent_subgoals":
+            obj_start = self.spec.obs_dim
+            pred_obj = pred_state[..., obj_start : obj_start + self.spec.goal_dim]
+            goal = torch.as_tensor(
+                raw_state[obj_start + self.spec.goal_dim : obj_start + 2 * self.spec.goal_dim],
+                dtype=pred_state.dtype,
+                device=pred_state.device,
+            ).view(1, 1, -1)
+            obj_goal = torch.linalg.norm(pred_obj - goal, dim=-1)
+            if phase == "strike":
+                early = max(1, pred_obj.shape[1] // 3)
+                contact = torch.linalg.norm(pred_grip[:, :early, :2] - pred_obj[:, :early, :2], dim=-1).min(dim=1).values
+                late_best = obj_goal[:, early:].min(dim=1).values
+                scores = scores + self.phase_score_weight * (0.5 * contact + late_best)
+                if self.strike_action_weight > 0.0:
+                    raw_obj = raw_state[obj_start : obj_start + self.spec.goal_dim]
+                    raw_goal = raw_state[obj_start + self.spec.goal_dim : obj_start + 2 * self.spec.goal_dim]
+                    d = raw_goal[:2] - raw_obj[:2]
+                    d = d / (float(np.linalg.norm(d)) + 1e-6)
+                    d_t = torch.as_tensor(d, dtype=action_tensor.dtype, device=action_tensor.device).view(1, 1, 2)
+                    forward = torch.sum(action_tensor[..., :2] * d_t, dim=-1)
+                    scores = scores + self.strike_action_weight * F.relu(0.35 - forward).mean(dim=1)
+            elif phase == "coast":
+                scores = scores + self.phase_score_weight * obj_goal.min(dim=1).values
+        return scores
 
     @torch.no_grad()
     def _plan(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
         raw_state = flatten_obs(obs)
-        target_state = self._target_state(raw_state)
+        phase, target_state = self._target_state(raw_state)
         state = torch.from_numpy(self.normalizer.encode(raw_state)).unsqueeze(0).to(self.device)
         target = torch.from_numpy(self.normalizer.encode(target_state)).unsqueeze(0).to(self.device)
         z = self.wm.encode(state)
@@ -126,37 +203,73 @@ class FlowJEPAChunkPolicy:
         low = torch.as_tensor(env.action_space.low, dtype=torch.float32, device=self.device)
         high = torch.as_tensor(env.action_space.high, dtype=torch.float32, device=self.device)
         action_tensor = chunks.view(self.candidates, H, A).clamp(low, high)
-        traj_z = self.wm.predict_rollout(z.repeat(self.candidates, 1), action_tensor, H)
-        latent_score = torch.sum(
-            (F.normalize(traj_z[:, -1], dim=-1) - F.normalize(z_goal, dim=-1)) ** 2,
-            dim=-1,
-        )
-        scores = self.latent_weight * latent_score
-        if self.state_weight > 0.0 or self.final_goal_weight > 0.0:
-            pred_state = self.normalizer.decode_tensor(self.wm.state_probe(traj_z))
-            pred_achieved = pred_state[..., self.spec.obs_dim : self.spec.obs_dim + self.spec.goal_dim]
-            target_achieved = torch.as_tensor(
-                target_state[self.spec.obs_dim : self.spec.obs_dim + self.spec.goal_dim],
-                dtype=pred_state.dtype,
-                device=self.device,
-            ).view(1, 1, -1)
-            local_dist = torch.linalg.norm(pred_achieved - target_achieved, dim=-1)
-            scores = scores + self.state_weight * (local_dist[:, -1] + 0.25 * local_dist.mean(dim=1))
-            final_goal = torch.as_tensor(
-                raw_state[self.spec.obs_dim + self.spec.goal_dim : self.spec.obs_dim + 2 * self.spec.goal_dim],
-                dtype=pred_state.dtype,
-                device=self.device,
-            ).view(1, 1, -1)
-            final_dist = torch.linalg.norm(pred_achieved - final_goal, dim=-1)
-            scores = scores + self.final_goal_weight * (final_dist[:, -1] + 0.25 * final_dist.mean(dim=1))
-        if self.action_l2_weight > 0.0:
-            scores = scores + self.action_l2_weight * action_tensor.square().mean(dim=(1, 2))
-        if self.action_delta_weight > 0.0:
-            prev = torch.as_tensor(self.prev_action, dtype=torch.float32, device=self.device).view(1, 1, -1)
-            first_delta = action_tensor[:, :1] - prev
-            seq_delta = action_tensor[:, 1:] - action_tensor[:, :-1]
-            delta = torch.cat([first_delta, seq_delta], dim=1).square().mean(dim=(1, 2))
-            scores = scores + self.action_delta_weight * delta
+
+        def score_actions(actions: torch.Tensor) -> torch.Tensor:
+            traj_z = self.wm.predict_rollout(z.repeat(actions.shape[0], 1), actions, H)
+            latent_score = torch.sum(
+                (F.normalize(traj_z[:, -1], dim=-1) - F.normalize(z_goal, dim=-1)) ** 2,
+                dim=-1,
+            )
+            scores = self.latent_weight * latent_score
+            if (
+                self.state_weight > 0.0
+                or self.final_goal_weight > 0.0
+                or self.grip_weight > 0.0
+                or self.finger_weight > 0.0
+                or self.phase_score_weight > 0.0
+            ):
+                pred_state = self.normalizer.decode_tensor(self.wm.state_probe(traj_z))
+                pred_achieved = pred_state[..., self.spec.obs_dim : self.spec.obs_dim + self.spec.goal_dim]
+                target_achieved = torch.as_tensor(
+                    target_state[self.spec.obs_dim : self.spec.obs_dim + self.spec.goal_dim],
+                    dtype=pred_state.dtype,
+                    device=self.device,
+                ).view(1, 1, -1)
+                local_dist = torch.linalg.norm(pred_achieved - target_achieved, dim=-1)
+                scores = scores + self.state_weight * (local_dist[:, -1] + 0.25 * local_dist.mean(dim=1))
+                final_goal = torch.as_tensor(
+                    raw_state[self.spec.obs_dim + self.spec.goal_dim : self.spec.obs_dim + 2 * self.spec.goal_dim],
+                    dtype=pred_state.dtype,
+                    device=self.device,
+                ).view(1, 1, -1)
+                final_dist = torch.linalg.norm(pred_achieved - final_goal, dim=-1)
+                scores = scores + self.final_goal_weight * (final_dist[:, -1] + 0.25 * final_dist.mean(dim=1))
+                scores = scores + self._phase_scores(
+                    phase=phase,
+                    raw_state=raw_state,
+                    target_state=target_state,
+                    pred_state=pred_state,
+                    action_tensor=actions,
+                )
+            if self.action_l2_weight > 0.0:
+                scores = scores + self.action_l2_weight * actions.square().mean(dim=(1, 2))
+            if self.action_delta_weight > 0.0:
+                prev = torch.as_tensor(self.prev_action, dtype=torch.float32, device=self.device).view(1, 1, -1)
+                first_delta = actions[:, :1] - prev
+                seq_delta = actions[:, 1:] - actions[:, :-1]
+                delta = torch.cat([first_delta, seq_delta], dim=1).square().mean(dim=(1, 2))
+                scores = scores + self.action_delta_weight * delta
+            return scores
+
+        if self.refine_iters > 0:
+            anchor = action_tensor.detach()
+            center = (high + low) * 0.5
+            half = torch.clamp((high - low) * 0.5, min=1e-6)
+            normed = torch.clamp((anchor - center) / half, -0.999, 0.999)
+            u = torch.atanh(normed).detach().requires_grad_(True)
+            optimizer = torch.optim.Adam([u], lr=self.refine_lr)
+            with torch.enable_grad():
+                for _ in range(self.refine_iters):
+                    optimizer.zero_grad(set_to_none=True)
+                    refined = center + half * torch.tanh(u)
+                    scores = score_actions(refined)
+                    if self.refine_prior_weight > 0.0:
+                        scores = scores + self.refine_prior_weight * (refined - anchor).square().mean(dim=(1, 2))
+                    scores.mean().backward()
+                    optimizer.step()
+            action_tensor = (center + half * torch.tanh(u)).detach()
+
+        scores = score_actions(action_tensor)
         best = int(torch.argmin(scores).detach().cpu())
         return action_tensor[best].detach().cpu().numpy().astype(np.float32)
 
@@ -191,6 +304,19 @@ def main() -> None:
                    help="Weight for decoded achieved_goal distance to the local target.")
     p.add_argument("--final-goal-weight", type=float, default=0.0,
                    help="Weight for decoded achieved_goal distance to the episode final goal.")
+    p.add_argument("--grip-weight", type=float, default=0.0,
+                   help="Weight for decoded gripper distance to the local target gripper pose.")
+    p.add_argument("--finger-weight", type=float, default=0.0,
+                   help="Weight for decoded finger distance to the local target finger state.")
+    p.add_argument("--phase-score-weight", type=float, default=0.0,
+                   help="Weight for phase-specific decoded rollout costs.")
+    p.add_argument("--strike-action-weight", type=float, default=0.0,
+                   help="FetchSlide strike-phase weight for forward action commitment.")
+    p.add_argument("--refine-iters", type=int, default=0,
+                   help="Gradient-refine sampled action chunks through the JEPA rollout.")
+    p.add_argument("--refine-lr", type=float, default=0.04)
+    p.add_argument("--refine-prior-weight", type=float, default=0.05,
+                   help="MSE anchor to the sampled flow-prior chunk during refinement.")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
@@ -233,6 +359,13 @@ def main() -> None:
         latent_weight=args.latent_weight,
         state_weight=args.state_weight,
         final_goal_weight=args.final_goal_weight,
+        grip_weight=args.grip_weight,
+        finger_weight=args.finger_weight,
+        phase_score_weight=args.phase_score_weight,
+        strike_action_weight=args.strike_action_weight,
+        refine_iters=args.refine_iters,
+        refine_lr=args.refine_lr,
+        refine_prior_weight=args.refine_prior_weight,
     )
     metrics = rollout_policy(env, policy, episodes=args.episodes, seed=args.seed)
     env.close()

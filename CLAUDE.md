@@ -1,8 +1,9 @@
 # CLAUDE.md — jepa-mini project guide
 
-Action-conditioned **JEPA world model** + learned **goal-conditioned policy** + **model-predictive
-control (MPC)** for Gymnasium-Robotics manipulation. The world model is a *predictor*, not a
-controller: the BC policy proposes actions and the world-model MPC refines them.
+Action-conditioned **JEPA world model** + self-supervised action priors +
+model-based control for Gymnasium-Robotics manipulation. The world model is a
+*predictor*, not a controller: demos/trials define desirable latent futures and
+action chunks, then JEPA rollouts score which chunks realize those futures.
 
 ## Repo map
 - `jepa_robotics/models/` — package: `world_model.py` (`ActionConditionedJEPA`: encoder + EMA target +
@@ -11,7 +12,7 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 - `jepa_robotics/scoring/` — per-task MPC score mixins (`manip`/`strike`/`goal`/`common`) composed into `JEPAMPCPolicy`.
 - `jepa_robotics/train.py` — WM training (multi-horizon JEPA loss + probes + VICReg; `--ensemble-heads`,
   `--episodes-npz` for offline data, non-goal-env support).
-- `jepa_robotics/train_policy.py` — BC of the policy on the **frozen** JEPA latent (`--episodes-npz`, `--her-relabel-frac`).
+- `jepa_robotics/train_policy.py` — historical BC of the policy on the **frozen** JEPA latent (`--episodes-npz`, `--her-relabel-frac`).
 - `jepa_robotics/evaluate.py` — `JEPAMPCPolicy` (random/CEM/grad; `latent`/`state`/`combined`/`manip`/`strike`,
   `--open-loop`/`--replan-window`) + Random/Scripted/SB3/LearnedPolicyOnly baselines.
 - `jepa_robotics/data.py` — episode collection, scripted experts (`reach`/`push`/`pick_place`/`slide`/`maze`),
@@ -22,7 +23,9 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 - `jepa_robotics/tasks.py` — `TASKS` dict (Fetch / slide / PointMaze / AntMaze / Adroit).
 - Roadmap-B scripts (unified Fetch controller): `collect_fetch_multi.py` (canonical union →npz),
   `eval_fetch_multi.py` (per-task success for one model+policy), `train_eval_multi.sh` (full pipeline).
-- Key scripts: `train_jepa_sb3_policy.py` (TQC+HER on latent; `--demo-npz` offline seeding),
+- Key scripts: `train_fetch_flow_prior.py` (flow action chunks), `train_fetch_inverse_prior.py`
+  (inverse action chunks), `eval_fetch_flow_jepa.py` / `eval_fetch_inverse_jepa.py`
+  (JEPA chunk selection), `train_jepa_sb3_policy.py` (TQC+HER on latent; `--demo-npz` offline seeding),
   `train_adroit_*.py` (teacher / reward-head / controller), `minari_to_npz.py` (D4RL→Episode npz),
   `eval_hjepa_maze.py` (Hierarchical-JEPA subgoal graph), `eval_wm_rollout.py` (WM accuracy probe),
   `train_eval_antmaze_hjepa.slurm` / `uncap_antmaze_hjepa.slurm`.
@@ -43,7 +46,7 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 |------|------|-----------|---------|
 | base | FetchReach-v4 | JEPA+MPC (grad, state) | 95–100% |
 | base | FetchPush-v4 | **flow prior + JEPA chunk selection** | 100% |
-| base | FetchPickAndPlace-v4 | JEPA policy + CEM (manip) | 100% |
+| base | FetchPickAndPlace-v4 | **inverse prior + JEPA chunk selection** | 100% |
 | base | **fetch_multi (one model+policy: reach+push+pick)** | unified JEPA policy+MPC (canonical adapter) | **1.00 / 0.97 / 1.00** (mean 0.99) |
 | 1 | FetchSlide-v4 | JEPA-latent TQC+HER | 0.83 |
 | 2 | PointMaze U/Med/Large | **H-JEPA** (subgoal graph) | 1.00 / 0.90 / 1.00 |
@@ -53,11 +56,13 @@ controller: the BC policy proposes actions and the world-model MPC refines them.
 | 3 | Adroit Door/Hammer/Pen/Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
 | 4 | FrankaKitchen-v1 | **control-aware-JEPA skill-hierarchy + online self-imitation** | **0.90 full-4 success** (3.88/4 sub-tasks) |
 
-Tiers 1–4 essentially cleared. FetchPush is now the clean LeCun-compatible base
-case: demos define local future latents, a flow-matching prior samples plausible
-action chunks conditioned on `(z_t, z_future)`, and JEPA dynamics selects the chunk
-that realizes the future (30/30 success on two eval seeds; mean final distance
-0.008 / 0.011). The three recurring lessons (see roadmaps + README):
+Tiers 1–4 essentially cleared. FetchPush and FetchPickAndPlace are now the clean
+LeCun-compatible base cases: demos/trials define future latents, a flow or
+inverse prior proposes action chunks conditioned on `(z_t, z_future)`, and JEPA
+dynamics selects the chunk that realizes the future. Push is 30/30 on two eval
+seeds (mean final distance 0.008 / 0.011); Pick is 30/30 with the inverse prior
+(mean final distance 0.011 with JEPA-ranked noisy candidates). The three
+recurring lessons (see roadmaps + README):
 **(a)** JEPA's *encoder/representation* is what carries control (BC/RL/diffusion act in the latent); its
 *predictor* only pays off for planning on **smooth** dynamics (Fetch reach/push, H-JEPA high level),
 not contact-rich (slide/Adroit/kitchen → model exploitation, predictor worse-than-no-op). **(b)** Long-horizon

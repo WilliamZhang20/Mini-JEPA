@@ -1,14 +1,12 @@
-"""Record an MP4 of the JEPA agent (learned policy + world-model MPC) solving a task.
+"""Record an MP4 of a historical JEPA policy + world-model MPC agent.
 
 Loads a trained JEPA world model and its goal-conditioned policy, runs the
 policy-seeded MPC controller for several episodes, and writes a video. Supports
 the same ``--vary-goal`` showcase mode as ``record_expert.py`` so the targets
 differ each episode (alternating table / mid-air for pick-and-place).
 
-    PYTHONNOUSERSITE=1 MUJOCO_GL=egl python scripts/record_jepa.py \
-        --task fetch_pick_place --vary-goal --episodes 6 \
-        --model-path runs/fetch_pick_place/checkpoints/pickplace_v2_model.pt \
-        --policy-path runs/fetch_pick_place/checkpoints/pickplace_v2_policy.pt
+This script requires a BC policy checkpoint. The current FetchPickAndPlace
+replacement uses ``eval_fetch_inverse_jepa.py`` instead.
 """
 from __future__ import annotations
 

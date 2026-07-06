@@ -437,20 +437,22 @@ matches the scripted controller by design. The more interesting result is the
 pure row: same success as the earlier pure model, better final distance, and much
 less shaky control.
 
-**FetchPickAndPlace-v4** (30 episodes, recurrent JEPA world model + learned
-policy on the latent). The learned controller matches the scripted reference,
-and adding world-model MPC refinement makes it slightly more precise:
+**FetchPickAndPlace-v4** (30 episodes). Pick/place no longer needs the old BC
+action prior. The replacement is a **self-supervised inverse action-chunk prior**
+conditioned on `(z_t, z_goal)` plus exact Fetch geometry. Trials teach which
+8-step action chunks cause which futures; the JEPA world model scores noisy
+candidate chunks at evaluation:
 
 | Policy / setup | Success | Mean final distance |
 | --- | ---: | ---: |
 | Random | 0.00 | 0.261 |
 | Scripted controller (conventional reference) | 1.00 | 0.014 |
-| JEPA policy (learned, on latent) | 1.00 | 0.017 |
-| JEPA policy + world-model MPC | 1.00 | **0.011** |
+| Historical JEPA BC policy (learned, on latent) | 1.00 | 0.017 |
+| Historical JEPA BC + world-model MPC | 1.00 | 0.011 |
+| **Inverse prior + JEPA chunk selection** | **1.00** | **0.011** |
 
-The earlier sampling-only planner (no learned policy) reached only ~0.40 success
-on the same model — it never reliably grasped. The jump to 1.00 is entirely from
-adding the learned action prior, not from changing the world model.
+The direct inverse prior also reaches 1.00 success (mean final distance 0.014).
+The old `pickplace_v2_policy.pt` BC artifact is no longer required.
 
 **FetchPush-v4** (30 episodes). Push no longer needs a BC action prior. The
 replacement is a **flow-matching action prior conditioned on `(z_t, z_future)`**:
@@ -479,9 +481,8 @@ online.
 `scripts/train_eval_object_v2.sh` runs the full pipeline for an object task:
 collect data with the scripted expert and train the recurrent JEPA world model.
 For `fetch_push`, it trains/evaluates the flow-prior + JEPA-selection replacement.
-For `fetch_pick_place`, it still behaviour-clones the goal-conditioned policy on
-the latent because grasping remains a narrow contact choreography where the flow
-replacement has not matched BC.
+For `fetch_pick_place`, it trains/evaluates the inverse-prior + JEPA-selection
+replacement. Neither path trains a state-to-action BC policy.
 
 ```bash
 TASK_NAME=fetch_pick_place RUN_TAG=pickplace_v2 \
@@ -489,21 +490,21 @@ TASK_NAME=fetch_pick_place RUN_TAG=pickplace_v2 \
 # or TASK_NAME=fetch_push
 ```
 
-To evaluate a trained model + policy directly:
+To evaluate the PickAndPlace inverse prior directly:
 
 ```bash
-python -m jepa_robotics.evaluate \
+python scripts/eval_fetch_inverse_jepa.py \
   --task fetch_pick_place \
   --model-path runs/fetch_pick_place/checkpoints/pickplace_v2_model.pt \
-  --policy-path runs/fetch_pick_place/checkpoints/pickplace_v2_policy.pt \
-  --policy-proposal-fraction 0.5 \
-  --episodes 30 --mpc-method cem --mpc-score manip \
-  --mpc-candidates 128 --mpc-horizon 12 --cem-iters 4 --action-std 0.5 \
-  --manip-reach-weight 0.1 --manip-path-weight 0.3 --device auto
+  --inverse-path runs/fetch_pick_place/checkpoints/pickplace_inverse_prior_h8_goalgeom.pt \
+  --goal-mode final --episodes 30 --candidates 64 --noise-std 0.05 \
+  --exec-k 1 --target-horizon 8 --latent-weight 1.0 \
+  --state-weight 5.0 --final-goal-weight 1.0 \
+  --action-delta-weight 0.01 --device auto
 ```
 
-This reports `random`, `scripted`, `jepa_policy` (the learned prior alone), and
-`jepa_mpc_..._policy50` (policy-seeded world-model MPC) on the same seeds.
+This reports the JEPA-ranked inverse-chunk controller; direct inverse execution
+is obtained with `--candidates 1 --latent-weight 0 --state-weight 0 --final-goal-weight 0`.
 
 ## Record A Video
 
@@ -511,11 +512,6 @@ Multi-episode showcase videos (with varied / mid-air goals) for the learned
 agent and the scripted reference:
 
 ```bash
-# Learned JEPA agent (policy + world-model MPC)
-python scripts/record_jepa.py --task fetch_pick_place --vary-goal --episodes 6 \
-  --model-path runs/fetch_pick_place/checkpoints/pickplace_v2_model.pt \
-  --policy-path runs/fetch_pick_place/checkpoints/pickplace_v2_policy.pt
-
 # Scripted reference controller
 python scripts/record_expert.py --task fetch_pick_place --vary-goal --episodes 6
 ```

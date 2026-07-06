@@ -1,4 +1,4 @@
-"""Build self-supervised latent subgoals for Fetch push/pick experiments.
+"""Build self-supervised latent subgoals for Fetch push/pick/slide experiments.
 
 This is an experimental alternative to BC/RL-tuned controllers. Demos identify
 desirable futures; their action labels are not a supervised policy target and
@@ -23,6 +23,7 @@ from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.subgoals import (
     build_fetch_pick_subgoal_artifact,
     build_fetch_push_subgoal_artifact,
+    build_fetch_slide_subgoal_artifact,
     save_subgoal_artifact,
 )
 from jepa_robotics.tasks import resolve_task
@@ -42,8 +43,8 @@ def main() -> None:
     args = parser.parse_args()
 
     task = resolve_task(args.task, None)
-    if task.name not in {"fetch_pick_place", "fetch_push"}:
-        raise ValueError("This builder is scoped to FetchPickAndPlace and FetchPush.")
+    if task.name not in {"fetch_pick_place", "fetch_push", "fetch_slide"}:
+        raise ValueError("This builder is scoped to FetchPickAndPlace, FetchPush, and FetchSlide.")
     device = torch.device(
         "cuda" if (args.device == "auto" and torch.cuda.is_available()) else
         (args.device if args.device != "auto" else "cpu")
@@ -67,7 +68,12 @@ def main() -> None:
     if env_spec != spec:
         raise ValueError(f"Model spec {spec} does not match collected env spec {env_spec}.")
 
-    build = build_fetch_push_subgoal_artifact if task.name == "fetch_push" else build_fetch_pick_subgoal_artifact
+    if task.name == "fetch_push":
+        build = build_fetch_push_subgoal_artifact
+    elif task.name == "fetch_slide":
+        build = build_fetch_slide_subgoal_artifact
+    else:
+        build = build_fetch_pick_subgoal_artifact
     artifact = build(episodes, spec, model=model, normalizer=normalizer, device=device)
     save_subgoal_artifact(args.out, artifact)
     counts = {phase: int(artifact["templates"][phase]["count"]) for phase in artifact["phases"]}

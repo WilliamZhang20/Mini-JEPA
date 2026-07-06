@@ -129,50 +129,47 @@ if [[ "$TASK_NAME" == "fetch_push" ]]; then
   python scripts/record_expert.py --task "$TASK_NAME" --vary-goal --episodes 6 --gain "$CONTROLLER_GAIN"
   echo "DONE TASK=$TASK_NAME MODEL=$MODEL_PATH FLOW=$FLOW_PATH SUBGOALS=$SUBGOAL_PATH EVAL=$EVAL_LOG VIDEO_DIR=$VIDEO_DIR"
 else
-  # Stage 2: behaviour-clone a goal-conditioned action prior on the JEPA latent.
-  # Pick-and-place still needs the precise grasp choreography from the action
-  # prior; the flow+JEPA replacement has only been validated for FetchPush.
-  POLICY_PATH="$CKPT_DIR/${RUN_TAG}_policy.pt"
-  python -m jepa_robotics.train_policy \
+  # Stage 2 (pick/place replacement): train a self-supervised inverse chunk
+  # prior, inverse(z_t, z_goal) -> a_{t:t+H-1}, from transition trials. The
+  # policy is not a state->action BC clone; the JEPA model remains the latent
+  # world model used to score candidate chunks at evaluation.
+  INVERSE_PATH="$CKPT_DIR/${RUN_TAG}_inverse_prior.pt"
+  python scripts/train_fetch_inverse_prior.py \
     --task "$TASK_NAME" \
     --model-path "$MODEL_PATH" \
-    --out "$POLICY_PATH" \
-    --collect-steps "${POLICY_COLLECT_STEPS:-200000}" \
-    --train-steps "${POLICY_TRAIN_STEPS:-30000}" \
-    --scripted-fraction 0.97 \
+    --out "$INVERSE_PATH" \
+    --collect-steps "${INVERSE_COLLECT_STEPS:-80000}" \
+    --train-steps "${INVERSE_TRAIN_STEPS:-25000}" \
+    --scripted-fraction 1.0 \
     --controller-gain "$CONTROLLER_GAIN" \
-    --action-noise 0.1 \
+    --action-noise 0.03 \
+    --chunk 8 \
+    --future-horizons 8 \
+    --concat-geometry \
+    --condition-on-goal-state \
+    --batch-size 512 \
+    --hidden 512 \
     --device cuda
 
-  # Stage 3: evaluate random / scripted / learned-policy / policy+world-model-MPC,
-  # and record the JEPA-agent video.
-  python -m jepa_robotics.evaluate \
+  python scripts/eval_fetch_inverse_jepa.py \
     --task "$TASK_NAME" \
-    --output-root runs \
     --model-path "$MODEL_PATH" \
-    --policy-path "$POLICY_PATH" \
-    --policy-proposal-fraction 0.5 \
+    --inverse-path "$INVERSE_PATH" \
+    --goal-mode final \
     --episodes "${EVAL_EPISODES:-30}" \
     --seed "${EVAL_SEED:-123}" \
-    --mpc-method cem \
-    --mpc-score manip \
-    --mpc-candidates "${MPC_CANDIDATES:-128}" \
-    --mpc-horizon 12 \
-    --cem-iters 4 \
-    --elite-frac 0.1 \
-    --action-std "$ACTION_STD" \
-    --manip-reach-weight "$MANIP_REACH_WEIGHT" \
-    --manip-path-weight 0.3 \
+    --candidates "${INVERSE_CANDIDATES:-64}" \
+    --noise-std 0.05 \
+    --exec-k 1 \
+    --target-horizon 8 \
+    --latent-weight 1.0 \
+    --state-weight 5.0 \
+    --final-goal-weight 1.0 \
+    --action-delta-weight 0.01 \
     --device cuda \
-    --out "$EVAL_LOG" \
-    --video-policy none \
-    --video-dir "$VIDEO_DIR" \
-    --fps 30
+    --out "$EVAL_LOG"
 
-  # Multi-episode showcase videos (varied / mid-air goals).
-  python scripts/record_jepa.py --task "$TASK_NAME" --vary-goal --episodes 6 \
-    --model-path "$MODEL_PATH" --policy-path "$POLICY_PATH" --device cuda
   python scripts/record_expert.py --task "$TASK_NAME" --vary-goal --episodes 6 --gain "$CONTROLLER_GAIN"
 
-  echo "DONE TASK=$TASK_NAME MODEL=$MODEL_PATH POLICY=$POLICY_PATH EVAL=$EVAL_LOG VIDEO_DIR=$VIDEO_DIR"
+  echo "DONE TASK=$TASK_NAME MODEL=$MODEL_PATH INVERSE=$INVERSE_PATH EVAL=$EVAL_LOG VIDEO_DIR=$VIDEO_DIR"
 fi

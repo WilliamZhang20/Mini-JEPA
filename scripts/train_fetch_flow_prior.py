@@ -25,9 +25,9 @@ from torch import nn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("MUJOCO_GL", "egl")
 
-from jepa_robotics.data import collect_episodes
-from jepa_robotics.envs import make_env
-from jepa_robotics.evaluate import load_jepa_artifact
+from jepa_robotics.data import Episode, collect_episodes
+from jepa_robotics.envs import flatten_obs, make_env, obs_spec_from_env
+from jepa_robotics.evaluate import SB3Policy, load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
 from scripts.train_diffusion_policy import EpsNet, make_ddpm
 
@@ -73,6 +73,42 @@ def fetch_geometry_features(state: np.ndarray, target_state: np.ndarray, spec) -
     ).astype(np.float32)
 
 
+def collect_policy_episodes(env, policy, *, num_steps: int, seed: int, log_every: int = 0):
+    spec = obs_spec_from_env(env)
+    episodes: list[Episode] = []
+    total_steps = 0
+    episode_idx = 0
+    while total_steps < num_steps:
+        obs, _ = env.reset(seed=seed + episode_idx)
+        if hasattr(policy, "reset"):
+            policy.reset()
+        states = [flatten_obs(obs)]
+        actions = []
+        terminated = truncated = False
+        while not (terminated or truncated) and total_steps < num_steps:
+            action = policy.act(obs, env)
+            action = np.clip(action, env.action_space.low, env.action_space.high).astype(np.float32)
+            next_obs, _, terminated, truncated, _info = env.step(action)
+            actions.append(action)
+            states.append(flatten_obs(next_obs))
+            obs = next_obs
+            total_steps += 1
+            if log_every > 0 and total_steps % log_every == 0:
+                print(
+                    f'{{"event": "collect", "steps": {total_steps}, "target_steps": {num_steps}}}',
+                    flush=True,
+                )
+        if actions:
+            episodes.append(
+                Episode(
+                    states=np.stack(states).astype(np.float32),
+                    actions=np.stack(actions).astype(np.float32),
+                )
+            )
+        episode_idx += 1
+    return episodes, spec
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="fetch_push")
@@ -80,6 +116,8 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--collect-steps", type=int, default=100_000)
     p.add_argument("--scripted-fraction", type=float, default=0.9)
+    p.add_argument("--trial-policy-path", type=Path, default=None,
+                   help="Optional SB3 checkpoint used only to collect trial trajectories.")
     p.add_argument("--controller-gain", type=float, default=12.0)
     p.add_argument("--action-noise", type=float, default=0.15)
     p.add_argument("--chunk", type=int, default=8)
@@ -116,16 +154,26 @@ def main() -> None:
         param.requires_grad_(False)
 
     env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
-    episodes, env_spec = collect_episodes(
-        env,
-        num_steps=args.collect_steps,
-        seed=args.seed,
-        scripted_fraction=args.scripted_fraction,
-        controller_gain=args.controller_gain,
-        action_noise=args.action_noise,
-        controller=task.controller,
-        log_every=max(1, args.collect_steps // 5),
-    )
+    if args.trial_policy_path is not None:
+        trial_policy = SB3Policy(args.trial_policy_path, name="trial_policy", env=env)
+        episodes, env_spec = collect_policy_episodes(
+            env,
+            trial_policy,
+            num_steps=args.collect_steps,
+            seed=args.seed,
+            log_every=max(1, args.collect_steps // 5),
+        )
+    else:
+        episodes, env_spec = collect_episodes(
+            env,
+            num_steps=args.collect_steps,
+            seed=args.seed,
+            scripted_fraction=args.scripted_fraction,
+            controller_gain=args.controller_gain,
+            action_noise=args.action_noise,
+            controller=task.controller,
+            log_every=max(1, args.collect_steps // 5),
+        )
     env.close()
     if env_spec != spec:
         raise ValueError(f"Model spec {spec} does not match collected env spec {env_spec}.")
@@ -178,6 +226,7 @@ def main() -> None:
                 "action_dim": int(action_dim),
                 "future_horizons": future_horizons,
                 "concat_geometry": bool(args.concat_geometry),
+                "trial_policy_path": None if args.trial_policy_path is None else str(args.trial_policy_path),
             }
         ),
         flush=True,
@@ -229,6 +278,7 @@ def main() -> None:
             "geom_std": None if geom_std is None else geom_std.squeeze(0).detach().cpu().numpy(),
             "model_path": str(args.model_path),
             "task": task.name,
+            "trial_policy_path": None if args.trial_policy_path is None else str(args.trial_policy_path),
         },
         args.out,
     )
