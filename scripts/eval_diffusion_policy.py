@@ -9,31 +9,34 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("MUJOCO_GL", "egl")
 
 from jepa_robotics.envs import make_env, flatten_obs
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
-from scripts.train_diffusion_policy import EpsNet, make_ddpm
+from jepa_robotics.algos.priors import EpsNet, make_ddpm
 
-TASKS = ["microwave", "kettle", "light switch", "slide cabinet"]   # standard D4RL complete-v2 set
+DEFAULT_TASKS = ["microwave", "kettle", "light switch", "slide cabinet"]   # standard D4RL complete-v2 set
 
 
 class Scheduler:
     """Pick the target subtask. Default: first incomplete (canonical). With a
     timeout: if the current target stalls, rotate to the next incomplete one so
     the policy attempts all remaining tasks instead of dead-ending on a hard one."""
-    def __init__(self, timeout=0):
+    def __init__(self, tasks, timeout=0):
+        self.tasks = tasks
         self.timeout = timeout; self.cur = 0; self.t_on = 0
 
     def update(self, done_tasks):
-        done_idx = {i for i, t in enumerate(TASKS) if t in done_tasks}
-        incomplete = [i for i in range(len(TASKS)) if i not in done_idx]
+        done_idx = {i for i, t in enumerate(self.tasks) if t in done_tasks}
+        incomplete = [i for i in range(len(self.tasks)) if i not in done_idx]
         if not incomplete:
             return self.cur
         if self.cur not in incomplete:                       # current done -> advance
@@ -47,7 +50,17 @@ class Scheduler:
 
 
 @torch.no_grad()
-def sample_chunk(net, ddpm, cond, chunk_dim, device, objective="diffusion", flow_steps=16, cfg_weight=1.0):
+def sample_chunk(
+    net,
+    ddpm,
+    cond,
+    chunk_dim,
+    device,
+    objective="diffusion",
+    flow_steps=16,
+    cfg_weight=1.0,
+    init_noise_scale=1.0,
+):
     """Sample one action chunk conditioned on cond [B, condL].
     diffusion -> DDPM reverse; flow -> Euler ODE integration of the velocity field.
     cfg_weight>1 applies classifier-free guidance: pred = uncond + w*(cond - uncond)."""
@@ -64,14 +77,14 @@ def sample_chunk(net, ddpm, cond, chunk_dim, device, objective="diffusion", flow
 
     if objective == "flow":
         T = ddpm["T"]
-        x = torch.randn(B, chunk_dim, device=device)
+        x = torch.randn(B, chunk_dim, device=device) * init_noise_scale
         dt = 1.0 / flow_steps
         for i in range(flow_steps):
             tau = torch.full((B,), i * dt, device=device)
             x = x + dt * predict(x, tau * T)     # same time scaling as training
         return x
     betas, alphas, abar, T = ddpm["betas"], ddpm["alphas"], ddpm["abar"], ddpm["T"]
-    a = torch.randn(B, chunk_dim, device=device)
+    a = torch.randn(B, chunk_dim, device=device) * init_noise_scale
     for t in reversed(range(T)):
         tt = torch.full((B,), t, device=device, dtype=torch.long)
         eps = predict(a, tt)
@@ -89,9 +102,15 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=20000)
     p.add_argument("--exec-k", type=int, default=4, help="actions executed per replan (receding horizon)")
     p.add_argument("--cfg-weight", type=float, default=1.0, help="classifier-free guidance weight (1.0 = none)")
+    p.add_argument("--init-noise-scale", type=float, default=1.0,
+                   help="Scale the initial noise for diffusion/flow sampling.")
+    p.add_argument("--action-scale", type=float, default=1.0,
+                   help="Scale sampled actions before clipping/execution.")
     p.add_argument("--subtask-timeout", type=int, default=0,
                    help="scheduler: if a target subtask isn't done within this many steps, rotate to the next "
                         "incomplete one (breaks the stuck-at-2 dead-end). 0 = no rotation.")
+    p.add_argument("--task-order", default=",".join(DEFAULT_TASKS),
+                   help="Comma-separated one-hot order used by a subtask-conditioned skill checkpoint.")
     p.add_argument("--collect-out", type=Path, default=None,
                    help="self-imitation: save rollouts reaching >= --collect-min-tasks as a labeled npz "
                         "(states, actions, target one-hot) to augment the scarce full-sequence training data")
@@ -105,10 +124,18 @@ def main() -> None:
     p.add_argument("--video-tail", type=int, default=30,
                    help="extra frames simulated AFTER success so the final motion (e.g. cabinet slide) "
                         "completes instead of the clip cutting off at the completion threshold")
-    p.add_argument("--device", default="cuda")
+    p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
+    tasks_order = [t.strip() for t in args.task_order.split(",") if t.strip()]
+    if len(tasks_order) != 4:
+        raise ValueError(f"--task-order must contain exactly 4 task names, got {tasks_order}")
 
-    dev = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if args.device == "auto":
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif args.device == "cuda" and not torch.cuda.is_available():
+        dev = torch.device("cpu")
+    else:
+        dev = torch.device(args.device)
     task = resolve_task(args.task, None)
     wm, norm, spec, cfg = load_jepa_artifact(args.model_path, dev)
     wm.eval()
@@ -148,7 +175,7 @@ def main() -> None:
         env = make_env(task.env_id, seed=args.seed + ep, max_episode_steps=task.max_episode_steps)
         low, high = env.action_space.low, env.action_space.high
         obs, _ = env.reset(seed=args.seed + ep)
-        progress = 0.0; done_tasks = set(); sched = Scheduler(args.subtask_timeout); target = sched.update(done_tasks)
+        progress = 0.0; done_tasks = set(); sched = Scheduler(tasks_order, args.subtask_timeout); target = sched.update(done_tasks)
         z = encode(obs, progress, target)
         hist = deque([z] * HH, maxlen=HH)             # consecutive latent history
         term = trunc = False; info = {}; step_i = 0; chunk = None; j = 0
@@ -156,7 +183,19 @@ def main() -> None:
         while not (term or trunc):
             if step_i % args.exec_k == 0:
                 cond = torch.cat(list(hist), dim=-1)  # [1, HH*L]
-                chunk = sample_chunk(net, ddpm, cond, chunk_dim, dev, objective, cfg_weight=args.cfg_weight)[0].cpu().numpy().reshape(H, A_dim)
+                chunk = (
+                    sample_chunk(
+                        net,
+                        ddpm,
+                        cond,
+                        chunk_dim,
+                        dev,
+                        objective,
+                        cfg_weight=args.cfg_weight,
+                        init_noise_scale=args.init_noise_scale,
+                    )[0].cpu().numpy().reshape(H, A_dim)
+                    * args.action_scale
+                )
                 j = 0
             a = np.clip(chunk[min(j, H - 1)], low, high).astype(np.float32)
             ep_A.append(a.copy()); ep_T.append(target)   # action + the subtask it pursued
@@ -193,7 +232,7 @@ def main() -> None:
                            render_mode="rgb_array", width=args.width, height=args.height)
             low, high = env.action_space.low, env.action_space.high
             obs, _ = env.reset(seed=args.seed + 5000 + ep)
-            progress = 0.0; done_tasks = set(); sched = Scheduler(args.subtask_timeout); target = sched.update(done_tasks)
+            progress = 0.0; done_tasks = set(); sched = Scheduler(tasks_order, args.subtask_timeout); target = sched.update(done_tasks)
             z = encode(obs, progress, target); hist = deque([z] * HH, maxlen=HH)
             term = trunc = False; info = {}; step_i = 0; chunk = None; j = 0
             f = env.render()
@@ -201,7 +240,19 @@ def main() -> None:
             while not (term or trunc):
                 if step_i % args.exec_k == 0:
                     cond = torch.cat(list(hist), dim=-1)
-                    chunk = sample_chunk(net, ddpm, cond, chunk_dim, dev, objective, cfg_weight=args.cfg_weight)[0].cpu().numpy().reshape(H, A_dim)
+                    chunk = (
+                        sample_chunk(
+                            net,
+                            ddpm,
+                            cond,
+                            chunk_dim,
+                            dev,
+                            objective,
+                            cfg_weight=args.cfg_weight,
+                            init_noise_scale=args.init_noise_scale,
+                        )[0].cpu().numpy().reshape(H, A_dim)
+                        * args.action_scale
+                    )
                     j = 0
                 a = np.clip(chunk[min(j, H - 1)], low, high).astype(np.float32)
                 obs, _, term, trunc, info = env.step(a)

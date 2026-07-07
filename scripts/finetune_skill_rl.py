@@ -29,10 +29,10 @@ os.environ.setdefault("MINARI_DATASETS_PATH", "/u5/w223zhan/jepa-mini/.cache/min
 from jepa_robotics.envs import make_env, flatten_obs
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
-from scripts.train_diffusion_policy import EpsNet, make_ddpm
-from scripts.eval_diffusion_policy import sample_chunk, Scheduler  # type: ignore
+from jepa_robotics.algos.priors import EpsNet, make_ddpm
+from scripts.eval_diffusion_policy import DEFAULT_TASKS, sample_chunk, Scheduler  # type: ignore
 
-TASKS = ["microwave", "kettle", "light switch", "slide cabinet"]
+TASKS = DEFAULT_TASKS
 
 
 def main() -> None:
@@ -89,7 +89,7 @@ def main() -> None:
         env = make_env(task.env_id, seed=seed, max_episode_steps=task.max_episode_steps)
         low, high = env.action_space.low, env.action_space.high
         obs, _ = env.reset(seed=seed)
-        prog = 0.0; done = set(); sched = Scheduler(0); tgt = sched.update(done)
+        prog = 0.0; done = set(); sched = Scheduler(TASKS, 0); tgt = sched.update(done)
         f = featurize_obs(obs, prog, tgt); hist = deque([f] * HH, maxlen=HH)
         term = trunc = False; info = {}; step_i = 0; chunk = None; j = 0
         conds, acts = [], []

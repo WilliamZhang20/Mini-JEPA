@@ -12,18 +12,22 @@ hand:
 
 | Tier | Task(s) | Best agent | Success |
 | --- | --- | --- | ---: |
-| base | FetchReach / Push / PickAndPlace | JEPA MPC / flow-prior+JEPA selection / JEPA policy+MPC | 1.00 / 1.00 / 1.00 |
+| base | FetchReach / Push / PickAndPlace | JEPA MPC / flow-prior+JEPA selection / inverse-prior+JEPA selection | 1.00 / 1.00 / 1.00 |
 | 1 | **FetchSlide** (ballistic strike) | JEPA-latent TQC + HER | 0.83 |
-| 2 | **PointMaze** UMaze / Medium / Large | **Hierarchical JEPA** | 1.00 / 0.90 / 1.00 |
+| 2 | **PointMaze** UMaze / Medium / Large | **H-JEPA + inverse low level** | 1.00 / 1.00 / 1.00 |
 | 2 | **AntMaze** UMaze (8-DoF ant) | Hierarchical JEPA | 0.93 |
-| 3 | **Adroit** Door / Hammer / Pen / Relocate | JEPA-latent BC on offline demos | 0.96 / 1.00 / 0.77 / 1.00 |
-| 4 | **FrankaKitchen** (4 sequential sub-tasks) | control-aware-JEPA skill-hierarchy + online self-imitation | **0.90 full-4** (3.88/4 sub-tasks) |
+| 3 | **Adroit** Door / Hammer / Pen / Relocate | SSL for Door/Hammer/Pen; BC for Relocate | 1.00 / 1.00 / 0.90 / 1.00 |
+| 4 | **FrankaKitchen** (4 sequential sub-tasks) | raw/chunked flow prior; hierarchy under repair | 0.08 full-4 current check (2.08/4 sub-tasks) |
 
-The repo is deliberately not one monolithic RL agent. It trains a JEPA predictive
-world model and a **goal-conditioned controller in its latent** — by behaviour
-cloning, HER reinforcement learning, or a hierarchical subgoal planner, whichever
-the task demands — and the experiments below map out *which* of those wins where,
-and why. Two findings recur and are documented in
+The repo is deliberately not one monolithic RL agent. It started with JEPA
+representations plus BC/HER controllers, but the active direction is now
+SSL-centric control: demos/trials specify desirable futures and transition
+evidence, action priors propose chunks conditioned on `(z_t, z_future)`, and JEPA
+dynamics selects or verifies the chunk that realizes the latent future. Some
+legacy BC/RL controllers remain where the replacement has not matched them yet
+(notably Slide and the offline dexterous/locomotion stacks). The experiments
+below map out *which* controller class wins where, and why. Two findings recur
+and are documented in
 ["What the world model is good for"](#what-the-world-model-is-good-for):
 
 1. **JEPA's encoder carries control; its predictor carries planning — but only on
@@ -37,8 +41,9 @@ and why. Two findings recur and are documented in
 
 - `jepa_robotics/train.py`: collects trajectories, trains the JEPA world model,
   and writes a checkpoint/model artifact.
-- `jepa_robotics/train_policy.py`: behaviour-clones a goal-conditioned action
-  prior on the (frozen) JEPA latent. This is the "controller" half of the agent.
+- `jepa_robotics/train_policy.py`: historical behaviour-cloned goal-conditioned
+  action prior on the frozen JEPA latent. Kept for baselines and tasks not yet
+  replaced by SSL action-prior control.
 - `jepa_robotics/evaluate.py`: compares random actions, a scripted controller,
   the learned policy on its own, and the policy-seeded JEPA+MPC planner. It can
   also record MP4 rollouts.
@@ -46,6 +51,35 @@ and why. Two findings recur and are documented in
   LeCun-compatible replacement controller: a conditional flow proposes action
   chunks from `(z_t, z_future)`, and JEPA dynamics selects the chunk that realizes
   the encoded demo/goal future.
+- `scripts/train_fetch_inverse_prior.py` / `scripts/eval_fetch_inverse_jepa.py`:
+  FetchPickAndPlace's SSL inverse-chunk replacement: train
+  `inverse(z_t, z_future) -> a_{t:t+H-1}` from trial transitions and rank noisy
+  candidates through the JEPA world model. The same inverse-prior artifact can
+  now serve as an H-JEPA low level in `eval_hjepa_maze.py --low-type inverse`.
+- `scripts/train_flat_future_inverse.py` / `scripts/eval_flat_future_inverse.py`:
+  flat-task Adroit experiment: retrieve a nearby demo future state, condition the
+  inverse prior on its latent, and execute/rank chunks without copying the demo
+  action label at runtime.
+- `scripts/train_flat_future_flow.py` / `scripts/eval_flat_future_flow.py`:
+  flat-task flow version of the same idea. It samples action chunks from
+  `flow(a_chunk | z_t, z_future)` and optionally appends normalized raw
+  current/future states for high-DoF proprioceptive precision.
+- `scripts/train_phase_future_inverse.py` / `scripts/eval_phase_future_inverse.py`:
+  hierarchical Adroit variant. Demonstrations are split into self-supervised
+  progress phases, the high level advances a phase/subgoal schedule, and the low
+  level predicts inverse chunks from `(z_t, z_future, phase_t, phase_future)`.
+- `scripts/train_phase_future_inverse_fast.py`: cached/vectorized version of the
+  phase inverse trainer. It batches latent encoding across all demonstrations
+  before optimization, avoiding the per-episode encoder bottleneck on large
+  Adroit datasets.
+- `jepa_robotics/algos/`: shared SSL-control utilities factored out of scripts.
+  `algos.phase` owns self-supervised phase features and phase-constrained future
+  indexing; `algos.priors` owns reusable inverse and flow/diffusion action-prior
+  networks; `algos.hwm` owns same-latent macro-action HWM components.
+- `scripts/train_latent_hwm.py` / `scripts/eval_latent_hwm.py`: HWM-style
+  same-latent hierarchy attempt inspired by arXiv:2604.03208. A high-level
+  macro world model predicts future JEPA latents from learned macro-actions; the
+  predicted latent subgoal is passed to a future-conditioned inverse low level.
 - `jepa_robotics/models/`: the action-conditioned JEPA model (recurrent latent
   dynamics, optional K-head ensemble) and the `GoalConditionedPolicy` action
   prior, split into `world_model.py` / `policy.py` / `mlp.py` / `regularizers.py`.
@@ -62,9 +96,26 @@ and why. Two findings recur and are documented in
   Hierarchical-JEPA evaluator (`eval_hjepa_maze.py`), the offline-demo adapter
   (`minari_to_npz.py`), world-model accuracy probe (`eval_wm_rollout.py`), and
   video recorders.
+- `docs/`: architecture/status notes and the experiment ledger for failed or
+  unresolved directions.
 
 Experiment outputs are intentionally ignored by Git. Checkpoints, videos, logs,
 and JSONL eval files are written under `runs/` by default.
+
+## SSL-Centric Transition Log
+
+This repo is moving controller learning from BC/RL execution policies toward
+self-supervised, future-conditioned action planning in latent space:
+
+| Task | Old controller | SSL-centric replacement status |
+| --- | --- | --- |
+| FetchPush | JEPA-latent BC + MPC | **Replaced** by flow prior + JEPA chunk selection: 1.00 over 30 episodes, mean final distance 0.008. |
+| FetchPickAndPlace | JEPA-latent BC + MPC | **Replaced** by inverse prior + JEPA chunk selection: 1.00 over 30 episodes, mean final distance 0.011. Old `pickplace_v2_policy.pt` removed. |
+| FetchSlide | JEPA-latent TQC/HER | **Not replaced yet.** H24 flow, RL-trial flow, inverse, goal-conditioned inverse, JEPA ranking/refinement, and action scaling all stayed near 0.0-0.1 success; old RL checkpoint retained. |
+| PointMaze | HER/SB3 low level + H-JEPA graph | **Replaced on checked runs** by inverse low level + H-JEPA graph: UMaze/Medium/Large = 1.00/1.00/1.00 over 20-episode checks. |
+| AntMaze | H-JEPA/HIQL/raw+JEPA controller | **Not replaced yet.** Offline SSL inverse low-level reached 0.50 flat / 0.70 H-JEPA on UMaze in earlier checks; the latest 2026-07-06 retest with 70 landmarks was 0.50 flat / 0.60 H-JEPA. Medium/Large HIQL checkpoints were non-reproducible in the current env (0/20 on seed 20000 and 41000). |
+| Adroit | JEPA-latent BC on offline demos | **Partial. Door, Hammer, and Pen replaced.** Door schedule-phase inverse reached 1.00/30 and old `door_bc_on_explorewm.pt` was removed. Hammer p4 schedule-phase inverse reached 1.00/30 on a fresh seed-64000 validation and old `adroit_hammer_bc_on_explorewm.pt` was removed. Pen raw+latent future flow reached 0.90/30 and old `adroit_pen_bc_on_explorewm.pt` was removed. Relocate remains capped around 0.40/10 with SSL variants, so BC is retained there. |
+| FrankaKitchen | skill-hierarchy / self-imitation logs | **Not solved under current code.** The previously logged `kitchen_flow_skill_ft3.pt` 0.90 full-4 result is not reproducible now: current checks give 0.10-0.20/4 mean tasks on the logged seeds. A 25-probe sweep found raw flow remains best: 2.12/4 with 0.12 full-4 at `exec-k=8/12` over 8 episodes, and 2.05/4 with 0.00 full-4 over a 20-episode validation using lower flow noise. JEPA latent reward selection was worse (1.10/4 over 10). |
 
 ## A World Model Is Not A Controller
 
@@ -85,16 +136,16 @@ to be true to match a conventional scripted controller, in order of leverage:
    is a needle in action-sequence space, and the object-to-goal cost is flat
    until the object is already grasped. Cost shaping alone plateaued near 40%.
 
-3. **The controller needs its own self-supervision.** We behaviour-clone a small
-   `GoalConditionedPolicy` on the frozen JEPA latent (`train_policy.py`). This
-   learned action prior knows the grasp choreography; the world-model MPC then
-   *refines and verifies* it. This mirrors how modern world-model agents work
-   (Dreamer, TD-MPC2, DINO-WM): a world model paired with a learned policy/value,
-   not planning-by-sampling alone.
+3. **The controller needs its own self-supervision.** Early runs used a small
+   BC `GoalConditionedPolicy` on the frozen JEPA latent. The current replacement
+   is stricter: train future-conditioned action priors from transitions rather
+   than copying `state -> action` labels. Push uses a flow prior; PickAndPlace
+   uses an inverse chunk prior. JEPA remains the latent world model that scores
+   whether a proposed action chunk realizes the future.
 
-The payoff (FetchPickAndPlace, 30 episodes): the learned policy alone matches the
-scripted controller, and policy + world-model MPC is slightly *more* precise than
-scripted. See [Results Snapshot](#results-snapshot).
+The payoff (FetchPickAndPlace, 30 episodes): the old BC policy is gone; the
+inverse prior plus JEPA chunk selection matches it at 1.00 success and reaches
+mean final distance 0.011. See [Results Snapshot](#results-snapshot).
 
 ## Beyond Fetch: Tiers 1–3
 
@@ -120,8 +171,10 @@ plateaus around 0.70 (it reaches *visible* goals but cannot route around walls).
 
 **Hierarchical JEPA (`eval_hjepa_maze.py`)** splits control into two timescales:
 
-- **Low level** — the goal-conditioned policy (HER for PointMaze, HER-relabeled BC
-  for AntMaze) acting on the JEPA latent; it reliably reaches *nearby* subgoals.
+- **Low level** — originally a HER/BC policy acting on the JEPA latent; PointMaze
+  now also has a self-supervised inverse low level,
+  `inverse(z_t, z_subgoal) -> a_{t:t+H-1}`, trained from transition trials.
+  AntMaze still needs a stronger walker before this replacement can beat HIQL.
 - **High level** — a **data-driven subgoal graph**: landmarks sampled in
   achieved-goal (x, y) space, with an edge between two landmarks only if the agent
   *empirically* got from one to the other within *k* steps. Edges therefore only
@@ -132,45 +185,104 @@ This beats flat on **every** maze with the *same* low level:
 
 | Maze | Flat (low level → goal) | **Hierarchical JEPA** |
 | --- | ---: | ---: |
-| PointMaze UMaze | 0.70 | **1.00** |
-| PointMaze Medium | 0.70 | **0.90** |
-| PointMaze Large | 0.70 | **1.00** |
+| PointMaze UMaze | 1.00 with inverse low level | **1.00** |
+| PointMaze Medium | 1.00 with inverse low level | **1.00** |
+| PointMaze Large | 0.95 with inverse low level | **1.00** |
 | AntMaze UMaze (8-DoF ant) | 0.70 | **0.93** |
 
 The win magnitude is set by the low level's competence (the documented hierarchy
 caveat — the hierarchy cannot reach subgoals the low level cannot). On the bigger
 AntMaze layouts the offline-BC ant walker is the bottleneck, addressed by a
 stronger offline→online TQC+HER low level (`uncap_antmaze_hjepa.slurm`).
+There are two H-JEPA high-level styles in this repo: the empirical graph/Dijkstra
+planner above, and a neural high-level world model (`train_hjepa_hwm.py` /
+`eval_hjepa_hwm.py`) that predicts abstract macro futures. The neural high level
+is more generalizable in principle (it covers unseen macro pairs), but the
+checked AntMaze runs showed rollout compounding and wall-feasibility errors; the
+hard graph was more reliable on the benchmark layouts.
 
-### Tier 3 — Adroit dexterous hand (24–30-DoF): the whole suite
+### Tier 3 — Adroit dexterous hand (24–30-DoF): mixed
 
 The Adroit hand breaks the scripted-expert data engine — there is no simple
 geometric controller for finger coordination, and the observation is flat (no
 goal). From-scratch RL on these sparse-success, contact-rich tasks gets ~0%
-(see findings below). The fix is a **learned data source**: offline D4RL expert
-demonstrations (via [Minari](https://minari.farama.org/)), behaviour-cloned on
-the frozen JEPA latent (`minari_to_npz.py` → `train_policy.py --episodes-npz`).
+(see findings below). The first fix was a **learned data source**: offline D4RL
+expert demonstrations (via [Minari](https://minari.farama.org/)),
+behaviour-cloned on the frozen JEPA latent
+(`minari_to_npz.py` → `train_policy.py --episodes-npz`). The current SSL
+transition treats those demos as desirable future states instead of action labels
+where possible.
 
-| Adroit task | from-scratch RL | **JEPA-latent BC on offline demos** |
+| Adroit task | from-scratch RL | best checked controller |
 | --- | ---: | ---: |
-| Door | 0.00 | **0.96** |
-| Hammer | 0.00 | **1.00** |
-| Pen (in-hand reorientation) | 0.00 | **0.77** |
-| Relocate | 0.00 | **1.00** |
+| Door | 0.00 | **1.00 SSL schedule-phase inverse** over 30; old explore-WM BC removed |
+| Hammer | 0.00 | **1.00 SSL schedule-phase inverse** over 30; old explore-WM BC removed |
+| Pen (in-hand reorientation) | 0.00 | **0.90 SSL raw+latent future flow** over 30; old explore-WM BC removed |
+| Relocate | 0.00 | **1.00 BC**; SSL inverse/flow variants capped at 0.40/10 |
 
-Notably the BC controllers run on the *same* exploratory world model (trained on
-random data). The encoder is information-preserving enough (its state-probe loss
-forces the latent to reconstruct the full state) that BC clones the experts
-cleanly — the random-data latent only blocked RL *exploration*, never imitation.
+Notably the old BC controllers and the new Pen flow prior run on the *same*
+exploratory world model (trained on random data). The encoder is
+information-preserving enough (its state-probe loss forces the latent to
+reconstruct the full state) that demos can define either action policies or
+future latents. The open problem is not representation; it is turning
+contact-rich high-DoF demo futures into reliable latent-space control without
+falling back to copied action labels. Door and Hammer now do this with
+phase-scheduled inverse priors; Relocate remains BC-retained until an SSL
+replacement beats the checkpoint.
 
-### Tier 4 — FrankaKitchen (4 compositional sub-tasks): 0.90 full-success
+2026-07-07 Relocate follow-up: a phase-conditioned inverse prior was trained in
+two forms. A 120-demo smoke model reached only 0.10/10 with `exec-k=1`; a
+full-demo cached model (`train_phase_future_inverse_fast.py`, 222k pairs,
+60k-bank, hidden 128) reached 0.00/10 for both `exec-k=1` and `exec-k=4`.
+This points away from generic temporal phases for Relocate. The next plausible
+direction is object/contact-aware structure: explicit grasp/transport/place
+latent predicates or a stronger low-level contact prior, not more nearest-future
+phase scheduling.
 
-The hardest tier cleared, and it needed the whole upgraded stack. A 9-DoF arm must
+Second 2026-07-07 orthogonal sweep:
+Relocate horizon/scale variants stayed at 0.00/3 (`h8` at action-scale 0.8,
+`h16` at action-scale 1.2). Kitchen raw flow with more commitment regressed to
+1.40/4 over 5 episodes; Kitchen flat inverse and tiny same-latent HWM both
+scored 0. Hammer phase inverse p4 later validated at 1.00/30, replacing the old
+BC artifact; p6 was weaker. AntMaze UMaze showed
+that hierarchy should be conditional: the SSL inverse low level reached 1.00/2
+when pointed directly at the goal, while the relaxed H-JEPA graph reached 0.50/2.
+AntMaze Medium HIQL remained non-reproducible at 0.00/2.
+
+See `docs/EXPERIMENT_LEDGER.md` for the compact ledger of tried axes and why
+Relocate, AntMaze Medium/Large, Kitchen, and Slide remain below the previous
+best controllers.
+
+### Tier 4 — FrankaKitchen (4 compositional sub-tasks): regression logged, not solved
+
+A 9-DoF arm must
 complete an *ordered set* of 4 kitchen sub-tasks (microwave, kettle, light switch,
 slide cabinet). **Every flat controller scored 0** — BC, TD3+BC, IQL, CEM-MPC, and a
 latent Dreamer all fail, because the wall is *chaining*, not single-step control (the
 JEPA *predictor* is even worse-than-no-op here: contact-rich → model exploitation).
-Five ingredients, each earned by diagnosis, take it from 0 to 0.90 full success:
+Earlier logs showed the full upgraded stack reaching 0.90 full success, but that
+claim is now marked non-reproducible under the current code/environment:
+`kitchen_flow_skill_ft3.pt` collapses to 0.10-0.20/4 mean tasks on the old logged
+seeds, and one-hot task-order sweeps did not recover it. A 25-probe follow-up
+sweep tested raw/latent/concat/progress/CFG/strong/skill checkpoints, scheduler
+timeouts, flow initial-noise scale, and action scale. The best short-slice result
+is still raw action-chunked flow: 2.12/4 with 0.12 full-4 at `exec-k=8/12` over
+8 episodes; lower initial flow noise briefly reached 2.25/4 over 8 episodes but
+validated at only 2.05/4 and 0.00 full-4 over 20. JEPA reward-head chunk selection
+with 16 candidates scored 1.10/4 over 10 episodes, worse than the raw prior, so
+the latent reward/rollout selector is not trustworthy on this contact sequence
+yet.
+
+An HWM-style same-latent hierarchy is now implemented as an explicit next
+algorithmic attempt (`train_latent_hwm.py` / `eval_latent_hwm.py`): train a
+macro-action encoder plus high-level JEPA predictor in the frozen low-level
+latent space, plan macro-actions with CEM toward demo terminal latents, then use
+a future-conditioned inverse low level to realize the first predicted latent
+subgoal. A tiny 100-step Kitchen smoke run validated the code path but scored
+0.0 tasks on 1 episode; full HWM/inverse training is currently the bottleneck
+because the naive CPU/GPU loop is too slow for quick iteration.
+
+The still-useful recipe and its historical logged progression:
 
 | step | what | full-4 |
 | --- | --- | ---: |
@@ -195,8 +307,9 @@ Five ingredients, each earned by diagnosis, take it from 0 to 0.90 full success:
 5. **Online self-imitation fine-tuning.** Warm-start the policy, collect fresh successes,
    fine-tune, iterate — full-4 **0.68 → 0.81 → 0.87 → 0.90**.
 
-Final: **3.88/4 sub-tasks on average, 0.90 full 4-task success** (4 seeds), entirely JEPA-based.
-Videos: `runs/franka_kitchen/videos/kitchen_jepa_rl_tuned.mp4` (online-tuned, 0.90) and
+Historical logged final: **3.88/4 sub-tasks on average, 0.90 full 4-task success** (4 seeds), entirely JEPA-based.
+Treat this as an unreproduced log until the hierarchy is repaired. Videos:
+`runs/franka_kitchen/videos/kitchen_jepa_rl_tuned.mp4` (online-tuned, logged 0.90) and
 `kitchen_jepa_skill_hierarchy.mp4` (offline, 0.68).
 
 **Behaviour analysis** (`scripts/analyze_kitchen_behavior.py`) pinpoints the bottleneck: the **3rd
@@ -555,16 +668,23 @@ Outputs are written under `runs/` and ignored by Git.
   flow-matching action-chunk prior conditioned on current/future JEPA latents,
   with JEPA dynamics selecting the chunk to execute.
 - `fetch_pick_place`: grasp and place, often at a mid-air goal. Solved (1.00
-  success) with the world model + learned policy + MPC; sampling-only MPC was
-  not enough (see ["A world model is not a controller"](#a-world-model-is-not-a-controller)).
+  success) with an SSL inverse action prior plus JEPA chunk selection;
+  sampling-only MPC was not enough (see
+  ["A world model is not a controller"](#a-world-model-is-not-a-controller)).
 - `fetch_slide`: ballistic strike, gripper locked, goal out of reach. Solved
   (0.83) by a TQC+HER controller on the JEPA latent; flat MPC fails (Tier 1).
 - `point_umaze` / `point_medium` / `point_large`, `antmaze_*`: maze navigation,
   solved by Hierarchical JEPA (Tier 2). AntMaze env ids must match the Minari
   D4RL dataset they were recorded with (`AntMaze_*_Diverse_GR-v4`).
 - `adroit_door` / `adroit_hammer` / `adroit_pen` / `adroit_relocate`: 24–30-DoF
-  dexterous hand, flat non-goal observation. Solved by behaviour cloning offline
-  D4RL demos on the JEPA latent (Tier 3); from-scratch RL gets ~0%.
+  dexterous hand, flat non-goal observation. Door is now controlled by a
+  schedule-phase inverse prior; Hammer by the p4 schedule-phase inverse prior;
+  Pen by a raw+latent future-conditioned flow prior. Relocate still uses a
+  retained offline-demo BC checkpoint until an SSL prior beats it. Explore
+  world-model artifacts are merged under each task
+  as `runs/adroit_*/explore`; top-level `runs/adroit_*_explore` paths are
+  compatibility symlinks, and canonical `runs/adroit_*/checkpoints/*_jepa_model.pt`
+  links point at the merged explore checkpoints.
 
 ### Offline demos (Adroit / AntMaze)
 
@@ -583,19 +703,25 @@ python -m jepa_robotics.train_policy --task adroit_door \
 ## Current Limitations
 
 - This is low-dimensional state JEPA, not pixel JEPA.
-- **Model-based planning does not help contact-rich control** (slide, Adroit) — it
-  exploits world-model error; those tasks are solved by learned control (BC/HER) on
-  the JEPA latent, not by planning. See
-  [What the world model is good for](#what-the-world-model-is-good-for).
-- Hierarchical JEPA's ceiling is the low-level controller's competence; weak
-  locomotion (offline-BC ant) caps the harder AntMaze layouts (~0.25–0.30, genuinely
-  hard offline benchmarks where 1.0 is not realistic).
+- **Model-based primitive planning still does not solve the hardest contact
+  control** (Slide, much of Adroit). Slide was explicitly re-tested with H24 flow
+  priors, RL-trial flow priors, deterministic inverse priors, goal-conditioned
+  inverse priors, JEPA ranking/refinement, and action scaling; none matched the
+  retained JEPA-latent TQC/HER checkpoint. Adroit Door, Hammer, and Pen converted
+  to SSL future-conditioned priors, but Relocate keeps BC until an
+  inverse/flow/phase/contact-aware chunk replacement matches it.
+- Hierarchical JEPA's ceiling is the low-level controller's competence; AntMaze
+  is solved only when the low-level walker is strong enough. The 2026-07-06
+  retest also showed current-tree AntMaze Medium/Large HIQL checkpoints are not
+  reproducible under the active environment, so those rows need repair/retraining
+  before claiming SOTA again.
 - The MPC refinement (where it helps) runs online, so policy + MPC is slower than
   the feed-forward policy alone.
 - On contact-rich long-horizon manipulation (FrankaKitchen), the plain JEPA latent
-  *trails raw obs* until an inverse-dynamics auxiliary makes it control-aware, and the
-  JEPA *predictor* is worse-than-no-op (planning is hopeless) — control there comes from
-  the encoder + an action-chunked flow skill-hierarchy + DAgger, not from the world model.
+  *trails raw obs*, and the JEPA *predictor* / reward-head selector is currently
+  worse than the raw action prior. The old 0.90 full-4 hierarchy log is not
+  reproducible in the current tree; keep Kitchen marked open until the
+  SSL/hierarchy stack is repaired and revalidated.
 - Clean negatives logged this round (kitchen): classifier-free guidance hurts, progress/
   history conditioning and scheduler stall-rotation are within noise, and a single
   bigger-net "stronger push" regressed — the wins came from the four ingredients above,

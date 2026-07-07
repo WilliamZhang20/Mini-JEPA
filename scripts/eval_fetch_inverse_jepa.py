@@ -19,7 +19,7 @@ from jepa_robotics.evaluate import load_jepa_artifact, rollout_policy
 from jepa_robotics.subgoals import load_subgoal_artifact, make_latent_subgoal_target_state
 from jepa_robotics.tasks import resolve_task
 from scripts.train_fetch_flow_prior import fetch_geometry_features
-from scripts.train_fetch_inverse_prior import InversePrior
+from jepa_robotics.algos.priors import InversePrior
 
 
 class InverseJEPAChunkPolicy:
@@ -169,6 +169,10 @@ def main() -> None:
     p.add_argument("--action-delta-weight", type=float, default=0.0)
     p.add_argument("--action-scale", type=float, default=1.0)
     p.add_argument("--out", type=Path, default=None)
+    p.add_argument("--video-out", type=Path, default=None)
+    p.add_argument("--width", type=int, default=640)
+    p.add_argument("--height", type=int, default=480)
+    p.add_argument("--fps", type=int, default=30)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
 
@@ -182,7 +186,14 @@ def main() -> None:
     subgoal_artifact = load_subgoal_artifact(args.subgoal_path) if args.subgoal_path is not None else None
     if args.goal_mode == "local" and subgoal_artifact is None:
         raise ValueError("--goal-mode local requires --subgoal-path")
-    env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
+    env = make_env(
+        task.env_id,
+        seed=args.seed,
+        max_episode_steps=task.max_episode_steps,
+        render_mode="rgb_array" if args.video_out is not None else None,
+        width=args.width if args.video_out is not None else None,
+        height=args.height if args.video_out is not None else None,
+    )
     policy = InverseJEPAChunkPolicy(
         wm=wm, normalizer=normalizer, spec=spec, prior=prior, ckpt=ckpt, device=device,
         candidates=args.candidates, noise_std=args.noise_std, exec_k=args.exec_k,
@@ -192,7 +203,14 @@ def main() -> None:
         action_l2_weight=args.action_l2_weight, action_delta_weight=args.action_delta_weight,
         action_scale=args.action_scale,
     )
-    metrics = rollout_policy(env, policy, episodes=args.episodes, seed=args.seed)
+    metrics = rollout_policy(
+        env,
+        policy,
+        episodes=args.episodes,
+        seed=args.seed,
+        video_path=args.video_out,
+        fps=args.fps,
+    )
     env.close()
     row = {"event": "inverse_jepa_eval", "task": task.name, "model_path": str(args.model_path), "inverse_path": str(args.inverse_path), "model_config": cfg, **metrics}
     print(json.dumps(row, default=str), flush=True)

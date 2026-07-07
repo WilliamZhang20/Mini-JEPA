@@ -30,7 +30,7 @@ from jepa_robotics.subgoals import load_subgoal_artifact, make_latent_subgoal_ta
 from jepa_robotics.tasks import resolve_task
 from scripts.eval_diffusion_policy import sample_chunk
 from scripts.train_fetch_flow_prior import fetch_geometry_features
-from scripts.train_diffusion_policy import EpsNet, make_ddpm
+from jepa_robotics.algos.priors import EpsNet, make_ddpm
 
 
 class FlowJEPAChunkPolicy:
@@ -318,6 +318,10 @@ def main() -> None:
     p.add_argument("--refine-prior-weight", type=float, default=0.05,
                    help="MSE anchor to the sampled flow-prior chunk during refinement.")
     p.add_argument("--out", type=Path, default=None)
+    p.add_argument("--video-out", type=Path, default=None)
+    p.add_argument("--width", type=int, default=640)
+    p.add_argument("--height", type=int, default=480)
+    p.add_argument("--fps", type=int, default=30)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
 
@@ -340,7 +344,14 @@ def main() -> None:
     if args.goal_mode == "local" and subgoal_artifact is None:
         raise ValueError("--goal-mode local requires --subgoal-path")
 
-    env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
+    env = make_env(
+        task.env_id,
+        seed=args.seed,
+        max_episode_steps=task.max_episode_steps,
+        render_mode="rgb_array" if args.video_out is not None else None,
+        width=args.width if args.video_out is not None else None,
+        height=args.height if args.video_out is not None else None,
+    )
     policy = FlowJEPAChunkPolicy(
         wm=wm,
         normalizer=normalizer,
@@ -367,7 +378,14 @@ def main() -> None:
         refine_lr=args.refine_lr,
         refine_prior_weight=args.refine_prior_weight,
     )
-    metrics = rollout_policy(env, policy, episodes=args.episodes, seed=args.seed)
+    metrics = rollout_policy(
+        env,
+        policy,
+        episodes=args.episodes,
+        seed=args.seed,
+        video_path=args.video_out,
+        fps=args.fps,
+    )
     env.close()
     row = {
         "event": "flow_jepa_eval",

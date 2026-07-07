@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 
 os.environ.setdefault("MUJOCO_GL", "egl")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from jepa_robotics.envs import make_env, flatten_obs
 from jepa_robotics.evaluate import load_jepa_artifact, load_policy_artifact
@@ -35,7 +37,10 @@ def main() -> None:
     p.add_argument("--fps", type=int, default=30)
     args = p.parse_args()
 
-    device = torch.device(args.device)
+    device = torch.device(
+        "cuda" if (args.device == "auto" and torch.cuda.is_available()) else
+        (args.device if args.device != "auto" else "cpu")
+    )
     task = resolve_task(args.task, None)
     model, normalizer, spec, _ = load_jepa_artifact(args.model_path, device)
     policy, _ = load_policy_artifact(args.policy_path, device)

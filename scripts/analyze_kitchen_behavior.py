@@ -6,21 +6,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from collections import Counter, deque
 from pathlib import Path
 
 import numpy as np
 import torch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("MUJOCO_GL", "egl")
 
 from jepa_robotics.envs import make_env, flatten_obs
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
-from scripts.train_diffusion_policy import EpsNet, make_ddpm
-from scripts.eval_diffusion_policy import sample_chunk, Scheduler  # type: ignore
+from jepa_robotics.algos.priors import EpsNet, make_ddpm
+from scripts.eval_diffusion_policy import DEFAULT_TASKS, sample_chunk, Scheduler  # type: ignore
 
-TASKS = ["microwave", "kettle", "light switch", "slide cabinet"]
+TASKS = DEFAULT_TASKS
 
 
 def main() -> None:
@@ -30,10 +32,20 @@ def main() -> None:
     p.add_argument("--episodes", type=int, default=80)
     p.add_argument("--exec-k", type=int, default=4)
     p.add_argument("--seed", type=int, default=20000)
-    p.add_argument("--device", default="cuda")
+    p.add_argument("--task-order", default=",".join(DEFAULT_TASKS),
+                   help="Comma-separated one-hot order used by a subtask-conditioned skill checkpoint.")
+    p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
+    tasks_order = [t.strip() for t in args.task_order.split(",") if t.strip()]
+    if len(tasks_order) != 4:
+        raise ValueError(f"--task-order must contain exactly 4 task names, got {tasks_order}")
 
-    dev = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if args.device == "auto":
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif args.device == "cuda" and not torch.cuda.is_available():
+        dev = torch.device("cpu")
+    else:
+        dev = torch.device(args.device)
     task = resolve_task("franka_kitchen", None)
     wm, norm, spec, cfg = load_jepa_artifact(args.model_path, dev); wm.eval()
     ck = torch.load(args.policy, map_location=dev, weights_only=False)
@@ -60,7 +72,7 @@ def main() -> None:
         env = make_env(task.env_id, seed=args.seed + ep, max_episode_steps=task.max_episode_steps)
         low, high = env.action_space.low, env.action_space.high
         obs, _ = env.reset(seed=args.seed + ep)
-        prog = 0.0; done = set(); order = []; sched = Scheduler(0); tgt = sched.update(done)
+        prog = 0.0; done = set(); order = []; sched = Scheduler(tasks_order, 0); tgt = sched.update(done)
         f = enc(obs, prog, tgt); hist = deque([f] * HH, maxlen=HH)
         term = trunc = False; info = {}; step_i = 0; chunk = None; j = 0
         with torch.no_grad():

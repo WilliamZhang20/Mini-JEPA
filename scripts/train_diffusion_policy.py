@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 from pathlib import Path
 
@@ -31,51 +30,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("MINARI_DATASETS_PATH", "/u5/w223zhan/jepa-mini/.cache/minari")
 
 from jepa_robotics.evaluate import load_jepa_artifact
-
-
-def sinusoidal_embedding(t, dim):
-    # t: [B] long diffusion-step indices -> [B, dim]
-    half = dim // 2
-    freqs = torch.exp(-math.log(10000) * torch.arange(half, device=t.device) / (half - 1))
-    args = t.float()[:, None] * freqs[None, :]
-    return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
-
-
-class EpsNet(nn.Module):
-    """Noise predictor eps_theta(a_noisy[H*A], t, cond[L]) -> noise[H*A]."""
-
-    def __init__(self, chunk_dim, cond_dim, hidden=512, t_dim=128, n_blocks=4):
-        super().__init__()
-        self.t_mlp = nn.Sequential(nn.Linear(t_dim, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
-        self.t_dim = t_dim
-        self.cond_mlp = nn.Sequential(nn.Linear(cond_dim, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
-        self.in_proj = nn.Linear(chunk_dim, hidden)
-        self.blocks = nn.ModuleList()
-        for _ in range(n_blocks):
-            self.blocks.append(nn.ModuleDict({
-                "norm": nn.LayerNorm(hidden),
-                "cond": nn.Linear(2 * hidden, hidden),   # inject (t_emb, cond_emb)
-                "ff": nn.Sequential(nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, hidden)),
-            }))
-        self.out = nn.Sequential(nn.LayerNorm(hidden), nn.Linear(hidden, chunk_dim))
-
-    def forward(self, a_noisy, t, cond):
-        temb = self.t_mlp(sinusoidal_embedding(t, self.t_dim))
-        cemb = self.cond_mlp(cond)
-        ctx = torch.cat([temb, cemb], dim=-1)
-        h = self.in_proj(a_noisy)
-        for blk in self.blocks:
-            x = blk["norm"](h)
-            x = x + blk["cond"](ctx)
-            h = h + blk["ff"](x)
-        return self.out(h)
-
-
-def make_ddpm(T, device):
-    betas = torch.linspace(1e-4, 0.02, T, device=device)
-    alphas = 1.0 - betas
-    abar = torch.cumprod(alphas, 0)
-    return {"betas": betas, "alphas": alphas, "abar": abar, "T": T}
+from jepa_robotics.algos.priors import EpsNet, make_ddpm
 
 
 def main() -> None:

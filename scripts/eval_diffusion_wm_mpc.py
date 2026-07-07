@@ -19,26 +19,38 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 import torch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("MUJOCO_GL", "egl")
 
 from jepa_robotics.envs import make_env, flatten_obs
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.models import MLP
 from jepa_robotics.tasks import resolve_task
-from scripts.train_diffusion_policy import EpsNet, make_ddpm
+from scripts.eval_diffusion_policy import DEFAULT_TASKS, Scheduler
+from jepa_robotics.algos.priors import EpsNet, make_ddpm
 from scripts.train_latent_dynamics import EnsembleLatentDynamics, LatentDynamics
 
 
 @torch.no_grad()
-def sample_chunks(net, ddpm, cond, n, chunk_dim, device):
+def sample_chunks(net, ddpm, cond, n, chunk_dim, device, objective="diffusion", flow_steps=16):
     """Sample n action chunks conditioned on the single latent cond [1, L]."""
-    betas, alphas, abar, T = ddpm["betas"], ddpm["alphas"], ddpm["abar"], ddpm["T"]
     c = cond.repeat(n, 1)
+    if objective == "flow":
+        T = ddpm["T"]
+        x = torch.randn(n, chunk_dim, device=device)
+        dt = 1.0 / flow_steps
+        for i in range(flow_steps):
+            tau = torch.full((n,), i * dt, device=device)
+            x = x + dt * net(x, tau * T, c)
+        return x
+    betas, alphas, abar, T = ddpm["betas"], ddpm["alphas"], ddpm["abar"], ddpm["T"]
     a = torch.randn(n, chunk_dim, device=device)
     for t in reversed(range(T)):
         tt = torch.full((n,), t, device=device, dtype=torch.long)
@@ -65,22 +77,47 @@ def score_chunks(dyn, rhead, z, chunks, H, A_dim, alow, ahigh, disagree_coef):
     return score
 
 
+@torch.no_grad()
+def score_chunks_jepa(wm, rhead, z, chunks, H, A_dim, alow, ahigh, disagree_coef):
+    n = chunks.shape[0]
+    acts = chunks.view(n, H, A_dim).clamp(alow, ahigh)
+    z_rep = z.repeat(n, 1)
+    traj = wm.predict_rollout(z_rep, acts, H)
+    scores = rhead(traj).squeeze(-1).sum(dim=1)
+    if getattr(wm, "ensemble_heads", 1) > 1 and disagree_coef > 0.0:
+        heads = wm.rollout_heads(z_rep, acts, H)
+        scores = scores - disagree_coef * heads.var(dim=0).mean(dim=(1, 2))
+    return scores
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="franka_kitchen")
     p.add_argument("--model-path", type=Path, required=True)
     p.add_argument("--policy", type=Path, required=True)
-    p.add_argument("--dynamics", type=Path, required=True)
+    p.add_argument("--dynamics", type=Path, default=None,
+                   help="Optional separate latent dynamics. Omit to score candidates with the JEPA rollout head.")
     p.add_argument("--reward-head", type=Path, required=True)
     p.add_argument("--episodes", type=int, default=30)
     p.add_argument("--seed", type=int, default=20000)
     p.add_argument("--candidates", type=int, default=16, help="diffusion chunks proposed per replan (1 = plain diffusion)")
     p.add_argument("--exec-k", type=int, default=8)
     p.add_argument("--disagree-coef", type=float, default=1.0)
-    p.add_argument("--device", default="cuda")
+    p.add_argument("--task-order", default=",".join(DEFAULT_TASKS),
+                   help="Comma-separated one-hot order used by a subtask-conditioned skill checkpoint.")
+    p.add_argument("--subtask-timeout", type=int, default=0)
+    p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
+    tasks_order = [t.strip() for t in args.task_order.split(",") if t.strip()]
+    if len(tasks_order) != 4:
+        raise ValueError(f"--task-order must contain exactly 4 task names, got {tasks_order}")
 
-    dev = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if args.device == "auto":
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif args.device == "cuda" and not torch.cuda.is_available():
+        dev = torch.device("cpu")
+    else:
+        dev = torch.device(args.device)
     task = resolve_task(args.task, None)
     wm, norm, spec, cfg = load_jepa_artifact(args.model_path, dev)
     wm.eval()
@@ -91,12 +128,20 @@ def main() -> None:
     net.load_state_dict(ck["ema"]); net.eval()
     ddpm = make_ddpm(ck["diffusion_steps"], dev)
     H, A_dim, chunk_dim = ck["H"], ck["action_dim"], ck["chunk_dim"]
+    HH = int(ck.get("obs_hist", 1))
+    objective = ck.get("objective", "diffusion")
+    raw_obs = bool(ck.get("raw_obs", False))
+    concat_raw = bool(ck.get("concat_raw", False))
+    progress_cond = bool(ck.get("progress_cond", False))
+    subtask_cond = bool(ck.get("subtask_cond", False))
 
-    dck = torch.load(args.dynamics, map_location=dev, weights_only=False)
-    nh = int(dck.get("n_heads", 1))
-    dyn = (EnsembleLatentDynamics(L, A_dim, dck["hidden"], nh) if nh > 1
-           else LatentDynamics(L, A_dim, dck["hidden"])).to(dev)
-    dyn.load_state_dict(dck["state_dict"]); dyn.eval()
+    dyn = None
+    if args.dynamics is not None:
+        dck = torch.load(args.dynamics, map_location=dev, weights_only=False)
+        nh = int(dck.get("n_heads", 1))
+        dyn = (EnsembleLatentDynamics(L, A_dim, dck["hidden"], nh) if nh > 1
+               else LatentDynamics(L, A_dim, dck["hidden"])).to(dev)
+        dyn.load_state_dict(dck["state_dict"]); dyn.eval()
     rck = torch.load(args.reward_head, map_location=dev, weights_only=False)
     rhead = MLP([rck["latent_dim"], rck["hidden"], rck["hidden"], 1]).to(dev)
     rhead.load_state_dict(rck["state_dict"]); rhead.eval()
@@ -106,17 +151,40 @@ def main() -> None:
     ahigh = torch.as_tensor(env0.action_space.high, dtype=torch.float32, device=dev)
     env0.close()
 
+    def encode_feature(obs, progress=0.0, target=None):
+        x = torch.from_numpy(norm.encode(flatten_obs(obs))).unsqueeze(0).to(dev)
+        if raw_obs:
+            feat = x
+        else:
+            z = wm.encode(x)
+            feat = torch.cat([x, z], dim=-1) if concat_raw else z
+        if progress_cond:
+            feat = torch.cat([feat, torch.full((1, 1), float(progress), device=dev)], dim=-1)
+        if subtask_cond:
+            oh = torch.zeros(1, 4, device=dev)
+            if target is not None:
+                oh[0, target] = 1.0
+            feat = torch.cat([feat, oh], dim=-1)
+        return feat
+
     tasks = []
     for ep in range(args.episodes):
         env = make_env(task.env_id, seed=args.seed + ep, max_episode_steps=task.max_episode_steps)
         low, high = env.action_space.low, env.action_space.high
         obs, _ = env.reset(seed=args.seed + ep)
+        progress = 0.0; done_tasks = set(); sched = Scheduler(tasks_order, args.subtask_timeout); target = sched.update(done_tasks)
+        hist = deque([encode_feature(obs, progress, target)] * HH, maxlen=HH)
         term = trunc = False; info = {}
         while not (term or trunc):
-            z = wm.encode(torch.from_numpy(norm.encode(flatten_obs(obs))).unsqueeze(0).to(dev))
-            chunks = sample_chunks(net, ddpm, z, args.candidates, chunk_dim, dev)
+            x = torch.from_numpy(norm.encode(flatten_obs(obs))).unsqueeze(0).to(dev)
+            z = wm.encode(x)
+            cond = torch.cat(list(hist), dim=-1)
+            chunks = sample_chunks(net, ddpm, cond, args.candidates, chunk_dim, dev, objective)
             if args.candidates > 1:
-                scores = score_chunks(dyn, rhead, z, chunks, H, A_dim, alow, ahigh, args.disagree_coef)
+                if dyn is not None:
+                    scores = score_chunks(dyn, rhead, z, chunks, H, A_dim, alow, ahigh, args.disagree_coef)
+                else:
+                    scores = score_chunks_jepa(wm, rhead, z, chunks, H, A_dim, alow, ahigh, args.disagree_coef)
                 best = chunks[int(torch.argmax(scores))]
             else:
                 best = chunks[0]
@@ -125,6 +193,10 @@ def main() -> None:
                 if term or trunc:
                     break
                 obs, _, term, trunc, info = env.step(np.clip(chunk[j], low, high).astype(np.float32))
+                done_tasks |= set(info.get("step_task_completions", []))
+                target = sched.update(done_tasks)
+                progress = float(info.get("tasks_done", 0)) / 4.0
+                hist.append(encode_feature(obs, progress, target))
         tasks.append(int(info.get("tasks_done", 0)))
         env.close()
     tasks = np.array(tasks)

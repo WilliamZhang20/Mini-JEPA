@@ -19,7 +19,8 @@ from torch import nn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("MUJOCO_GL", "egl")
 
-from jepa_robotics.data import collect_episodes
+from jepa_robotics.algos.priors import InversePrior
+from jepa_robotics.data import collect_episodes, load_episodes_npz, load_spec_npz
 from jepa_robotics.envs import goal_state_from_state, make_env
 from jepa_robotics.evaluate import SB3Policy, load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
@@ -30,25 +31,14 @@ from scripts.train_fetch_flow_prior import (
 )
 
 
-class InversePrior(nn.Module):
-    def __init__(self, cond_dim: int, chunk_dim: int, hidden: int, n_blocks: int = 4) -> None:
-        super().__init__()
-        layers: list[nn.Module] = [nn.Linear(cond_dim, hidden), nn.SiLU()]
-        for _ in range(n_blocks - 1):
-            layers += [nn.Linear(hidden, hidden), nn.SiLU()]
-        layers.append(nn.Linear(hidden, chunk_dim))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, cond: torch.Tensor) -> torch.Tensor:
-        return self.net(cond)
-
-
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="fetch_slide")
     p.add_argument("--model-path", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--trial-policy-path", type=Path, default=None)
+    p.add_argument("--episodes-npz", type=Path, default=None,
+                   help="Optional offline trial trajectories; skips live collection.")
     p.add_argument("--collect-steps", type=int, default=120_000)
     p.add_argument("--scripted-fraction", type=float, default=0.95)
     p.add_argument("--controller-gain", type=float, default=12.0)
@@ -80,25 +70,29 @@ def main() -> None:
     for param in wm.parameters():
         param.requires_grad_(False)
 
-    env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
-    if args.trial_policy_path is not None:
-        trial_policy = SB3Policy(args.trial_policy_path, name="trial_policy", env=env)
-        episodes, env_spec = collect_policy_episodes(
-            env, trial_policy, num_steps=args.collect_steps, seed=args.seed,
-            log_every=max(1, args.collect_steps // 5),
-        )
+    if args.episodes_npz is not None:
+        episodes = load_episodes_npz(args.episodes_npz)
+        env_spec = load_spec_npz(args.episodes_npz) or spec
     else:
-        episodes, env_spec = collect_episodes(
-            env,
-            num_steps=args.collect_steps,
-            seed=args.seed,
-            scripted_fraction=args.scripted_fraction,
-            controller_gain=args.controller_gain,
-            action_noise=args.action_noise,
-            controller=task.controller,
-            log_every=max(1, args.collect_steps // 5),
-        )
-    env.close()
+        env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
+        if args.trial_policy_path is not None:
+            trial_policy = SB3Policy(args.trial_policy_path, name="trial_policy", env=env)
+            episodes, env_spec = collect_policy_episodes(
+                env, trial_policy, num_steps=args.collect_steps, seed=args.seed,
+                log_every=max(1, args.collect_steps // 5),
+            )
+        else:
+            episodes, env_spec = collect_episodes(
+                env,
+                num_steps=args.collect_steps,
+                seed=args.seed,
+                scripted_fraction=args.scripted_fraction,
+                controller_gain=args.controller_gain,
+                action_noise=args.action_noise,
+                controller=task.controller,
+                log_every=max(1, args.collect_steps // 5),
+            )
+        env.close()
     if env_spec != spec:
         raise ValueError(f"Model spec {spec} does not match collected env spec {env_spec}.")
 
@@ -173,6 +167,7 @@ def main() -> None:
             "model_path": str(args.model_path),
             "task": task.name,
             "trial_policy_path": None if args.trial_policy_path is None else str(args.trial_policy_path),
+            "episodes_npz": None if args.episodes_npz is None else str(args.episodes_npz),
             "condition_on_goal_state": bool(args.condition_on_goal_state),
         },
         args.out,

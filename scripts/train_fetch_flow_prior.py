@@ -29,7 +29,7 @@ from jepa_robotics.data import Episode, collect_episodes
 from jepa_robotics.envs import flatten_obs, make_env, obs_spec_from_env
 from jepa_robotics.evaluate import SB3Policy, load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
-from scripts.train_diffusion_policy import EpsNet, make_ddpm
+from jepa_robotics.algos.priors import EpsNet, make_ddpm
 
 
 def parse_horizons(value: str) -> list[int]:

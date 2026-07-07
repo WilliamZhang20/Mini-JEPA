@@ -22,11 +22,13 @@ from __future__ import annotations
 import argparse
 import heapq
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 
 os.environ.setdefault("MUJOCO_GL", "egl")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from jepa_robotics.envs import make_env, flatten_obs, obs_spec_from_env
 from jepa_robotics.data import collect_episodes
@@ -225,6 +227,56 @@ class LowLevelFlow:
         return np.clip(a, self.low, self.high).astype(np.float32)
 
 
+class LowLevelInverse:
+    """Self-supervised inverse chunk low level.
+
+    The high level sets ``desired_goal`` to the current subgoal. The inverse
+    prior receives ``(z_t, z_subgoal)`` and proposes the first action of an
+    H-step chunk. No action labels are copied at runtime.
+    """
+
+    def __init__(self, wm_path, inverse_path, low, high, device="cpu", target_horizon=None):
+        import torch
+        from jepa_robotics.envs import flatten_obs, goal_state_from_state
+        from jepa_robotics.evaluate import load_jepa_artifact
+        from jepa_robotics.algos.priors import InversePrior
+        self._torch = torch
+        self._flatten_obs = flatten_obs
+        self._goal_state_from_state = goal_state_from_state
+        self.dev = torch.device(device)
+        self.model, self.norm, self.spec, _ = load_jepa_artifact(Path(wm_path), self.dev)
+        art = torch.load(Path(inverse_path), map_location=self.dev, weights_only=False)
+        self.ckpt = art
+        self.prior = InversePrior(
+            int(art["cond_dim"]),
+            int(art["chunk_dim"]),
+            int(art["hidden"]),
+            int(art["n_blocks"]),
+        ).to(self.dev)
+        self.prior.load_state_dict(art["state_dict"])
+        self.prior.eval(); self.model.eval()
+        self.low, self.high = low, high
+        self.target_horizon = target_horizon or int(art["H"])
+
+    def act(self, obs, subgoal):
+        o = {k: np.array(v, copy=True) for k, v in obs.items()}
+        o["desired_goal"] = np.asarray(subgoal, dtype=np.float32)
+        raw = self._flatten_obs(o)
+        target = self._goal_state_from_state(raw, self.spec)
+        s = self._torch.from_numpy(self.norm.encode(raw)).unsqueeze(0).to(self.dev)
+        tgt = self._torch.from_numpy(self.norm.encode(target)).unsqueeze(0).to(self.dev)
+        with self._torch.no_grad():
+            z = self.model.encode(s)
+            z_goal = self.model.encode_target(tgt)
+            horizons = list(self.ckpt.get("future_horizons", [int(self.ckpt["H"])]))
+            h = float(self.target_horizon) / float(max(horizons))
+            h_token = self._torch.tensor([[h]], dtype=z.dtype, device=self.dev)
+            cond = self._torch.cat([z, z_goal, h_token], dim=-1)
+            chunk = self.prior(cond).view(int(self.ckpt["H"]), int(self.ckpt["action_dim"]))
+            a = chunk[0].cpu().numpy()
+        return np.clip(a, self.low, self.high).astype(np.float32)
+
+
 # ----------------------------- rollouts -------------------------------------
 def run_flat(env_id, max_steps, low, episodes, seed):
     succ = []
@@ -273,9 +325,10 @@ def run_hjepa(env_id, max_steps, low, landmarks, adj, episodes, seed, reach_radi
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="point_umaze")
-    p.add_argument("--low-type", default="sb3", choices=["sb3", "bc", "chunk", "flow"])
+    p.add_argument("--low-type", default="sb3", choices=["sb3", "bc", "chunk", "flow", "inverse"])
     p.add_argument("--low-policy", type=Path, default=None, help="SB3 HER low-level .zip (low-type sb3)")
     p.add_argument("--bc-policy", type=Path, default=None, help="BC GoalConditionedPolicy .pt (low-type bc)")
+    p.add_argument("--inverse-policy", type=Path, default=None, help="InversePrior .pt (low-type inverse)")
     p.add_argument("--jepa-model", type=Path, default=None, help="JEPA WM (.pt); fallback for sb3, encoder for bc")
     p.add_argument("--episodes", type=int, default=30)
     p.add_argument("--seed", type=int, default=20000)
@@ -320,6 +373,9 @@ def main() -> None:
     elif args.low_type == "flow":
         low = LowLevelFlow(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high,
                            device=args.device)
+    elif args.low_type == "inverse":
+        low = LowLevelInverse(args.jepa_model, args.inverse_policy, env.action_space.low, env.action_space.high,
+                              device=args.device)
     else:
         low = LowLevel(args.low_policy, env, device=args.device)
     env.close()
