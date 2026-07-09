@@ -48,14 +48,16 @@ not matched them.
   1.00 success.
 - Door, Hammer, and Pen have SSL replacements. Their old Adroit BC artifacts
   were removed after fresh validation.
-- Relocate is still open but close. Best SSL controller is a dual
-  possession-specialist inverse (reach + held specialists switched on the live
-  palm-ball predicate) tracking a demo-locked future index, with a palm-ball
-  emphasis on the reach specialist (live palm-ball vector duplicated 8x in its
-  conditioning) for closure micro-correction: 0.93/90 on untouched validation
-  seeds vs retained BC 1.00. Remaining failures split three ways — a residual
-  marginal reach miss, a wider reach miss, and an early transport drop just
-  after the reach->held switch.
+- Relocate is still open but very close (gap ~0.045). Best SSL controller is a
+  dual possession-specialist inverse (reach + held specialists switched on the
+  live palm-ball predicate at a firm 0.045) tracking a demo-locked future
+  index, with input-feature emphasis on both: the reach specialist duplicates
+  the live palm-ball vector (dims 30:33) 8x to servo grasp to the live ball,
+  and the held specialist duplicates the live ball-target vector (dims 36:39)
+  8x to servo placement to the live target. 0.957/210 on held-out seeds
+  (0.955/330 over 11 seeds) vs retained BC 1.00. Remaining failures are a
+  diverse long tail (residual reach misses on outlier ball positions, residual
+  placement offset, rare mid-transport drops).
 - PointMaze is solved with H-JEPA plus SSL inverse low level on checked runs.
 - AntMaze Medium/Large are not currently reproducible from historical HIQL logs.
 - FrankaKitchen is open. The old 0.90 full-4 log is not reproducible; raw flow

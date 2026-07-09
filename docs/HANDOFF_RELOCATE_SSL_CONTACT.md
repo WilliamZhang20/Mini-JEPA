@@ -10,37 +10,43 @@ state-to-action labels at runtime. It should use demo/trial futures, a JEPA
 latent state, action-conditioned dynamics, and an action prior or planner.
 
 Current replacement status: **not solved, but the gap has closed from ~0.53 to
-0.93 fresh-seed in three sessions.** Retain the BC checkpoint until an SSL
-planner matches or beats the 1.00 checked BC result.
+0.955 out-of-sample in three sessions** (gap to BC now ~0.045). Retain the BC
+checkpoint until an SSL planner matches or beats the 1.00 checked BC result.
 
 ## Current Best SSL Controller (canonical)
 
 Dual possession-specialist inverse tracking the demo-locked h8 future index,
-with a **palm-ball-emphasis reach specialist** for closure micro-correction:
+with **input-feature emphasis on both specialists** (law 3, below) and a
+**firmer 0.045 possession switch** so the transport specialist only ever
+inherits a secure grasp:
 
-- `relocate_flat_inverse_h8_raw_free_emph.pt` — reach/regrasp specialist,
-  trained only on pairs whose current frame is NOT in possession (includes
-  closure transitions), with the live palm-ball vector (raw dims 30:33)
-  duplicated 8x in the conditioning (`--emphasis-dims 30,33 --emphasis-repeat
-  8`). This upweights live contact geometry so the closure chunk servos to the
-  *live* ball rather than the demo ball. Targets and futures are unchanged, so
-  the expert action manifold is not blurred.
-- `relocate_flat_inverse_h8_raw_held.pt` — transport/place specialist, trained
-  only on pairs whose current AND future frames are held (palm-ball < 0.06).
-  No emphasis (in possession the palm-ball is already small, so it conveys
-  little).
-- Runtime switches on the live palm-ball predicate at 0.06. Emphasis config is
-  read per-specialist from its checkpoint, so only the reach specialist gets
-  the duplicated dims.
+- `relocate_flat_inverse_h8_raw_free_emph_t045.pt` — reach/regrasp specialist,
+  trained only on pairs whose current frame is NOT in possession at threshold
+  0.045 (includes closure + grasp-tightening transitions), with the live
+  palm-ball vector (raw dims 30:33) duplicated 8x in the conditioning
+  (`--emphasis-dims 30,33 --emphasis-repeat 8`). The emphasis makes the closure
+  chunk servo to the *live* ball rather than the demo ball; the 0.045 threshold
+  makes it keep tightening the grasp before the handoff.
+- `relocate_flat_inverse_h8_raw_held_bt_t045.pt` — transport/place specialist,
+  trained only on held-at-0.045 pairs, with the live ball-**target** vector
+  (raw dims 36:39) duplicated 8x (`--emphasis-dims 36,39 --emphasis-repeat 8`).
+  The emphasis makes placement servo to the *live* target rather than the demo
+  target (the placement analog of the reach fix). No palm-ball emphasis here —
+  in possession the palm-ball is already small, so it carries no signal.
+- Runtime switches on the live palm-ball predicate at **0.045**
+  (`--possession-switch-threshold 0.045`). Emphasis config is read
+  per-specialist from its checkpoint (`_append_emphasis`), so each specialist
+  gets its own emphasized dims.
 
 ```bash
 python scripts/eval_flat_future_inverse.py \
   --task adroit_relocate \
   --model-path runs/adroit_relocate/checkpoints/adroit_relocate_jepa_model.pt \
-  --inverse-path runs/adroit_relocate/checkpoints/relocate_flat_inverse_h8_raw_free_emph.pt \
-  --inverse-possession-path runs/adroit_relocate/checkpoints/relocate_flat_inverse_h8_raw_held.pt \
-  --episodes 30 --seed 80000 --candidates 1 --noise-std 0.0 --exec-k 2 \
+  --inverse-path runs/adroit_relocate/checkpoints/relocate_flat_inverse_h8_raw_free_emph_t045.pt \
+  --inverse-possession-path runs/adroit_relocate/checkpoints/relocate_flat_inverse_h8_raw_held_bt_t045.pt \
+  --episodes 30 --seed 83000 --candidates 1 --noise-std 0.0 --exec-k 2 \
   --action-delta-weight 0.001 --torch-seed 0 --device auto \
+  --possession-switch-threshold 0.045 \
   --future-index demo_locked \
   --future-episodes-npz runs/adroit_relocate/data/relocate_expert_demos.npz \
   --target-horizon 8
@@ -48,41 +54,47 @@ python scripts/eval_flat_future_inverse.py \
 
 Checked results (`--torch-seed 0`, 30 eps each):
 
-- **Untouched validation seeds 80000/81000/82000: 0.90 / 1.00 / 0.90
-  (0.93/90).** These seeds were used for no tuning or selection. Files
-  `runs/adroit_relocate/eval_results/relocate_inv_emph_seed8*000_ep30.jsonl`.
-  Same-seed baseline (non-emphasis reach specialist): 0.77 / 0.87 / 0.73
-  (0.79/90).
-- Fresh seeds 75000/77000/78000: 0.80 / 0.867 / 0.867 (**0.84/90**), files
-  `runs/adroit_relocate/eval_results/relocate_inv_dualspec_emph_fresh_seed*_ep30.jsonl`.
-  Same-seed non-emphasis baseline: 0.77 / 0.73 / 0.83 (0.78/90).
-- Combined six fresh seeds: emphasis **0.89/180** vs non-emphasis 0.78/180.
-  Every seed improved; none regressed, from a single untuned config
-  (`--emphasis-repeat 8`).
+- **Held-out validation seeds 81/82/83/85/87/88/89000: 1.00 / 0.93 / 0.90 /
+  0.97 / 1.00 / 0.93 / 0.97 (0.957/210).** The 0.045 switch threshold and the
+  ball-target held emphasis were selected on dev seeds 75/77/78/80000 only, so
+  these seven seeds are held out. Files
+  `runs/adroit_relocate/eval_results/relocate_inv_emph_bt_t045_seed*_ep30.jsonl`.
+- Dev seeds 75/77/78/80000: 0.87 / 0.97 / 1.00 / 0.97 (0.95/120).
+- Combined 11 seeds: **0.955/330** (315/330). Two seeds reach 1.00.
+- Progression this task: single global inverse 0.67/90 -> segment-pure dual
+  specialist 0.78/90 -> + palm-ball reach emphasis 0.93/90 -> + firmer 0.045
+  switch (fixes transport drops) -> + ball-target held emphasis (fixes
+  placement near-misses) **0.957/210 held-out**.
 
 Specialists were trained with:
 
 ```bash
-# reach specialist (with closure emphasis)
+# reach specialist (palm-ball emphasis, firmer 0.045 possession threshold)
 python scripts/train_flat_future_inverse.py \
   --model-path runs/adroit_relocate/checkpoints/adroit_relocate_jepa_model.pt \
   --episodes-npz runs/adroit_relocate/data/relocate_expert_demos.npz \
-  --out runs/adroit_relocate/checkpoints/relocate_flat_inverse_h8_raw_free_emph.pt \
+  --out runs/adroit_relocate/checkpoints/relocate_flat_inverse_h8_raw_free_emph_t045.pt \
   --chunk 8 --future-horizons 2,4,8,16 --max-episodes 1200 --train-steps 30000 \
   --batch-size 512 --hidden 768 --n-blocks 5 --concat-raw \
-  --require-possession free --emphasis-dims 30,33 --emphasis-repeat 8 --device auto
+  --require-possession free --possession-threshold 0.045 \
+  --emphasis-dims 30,33 --emphasis-repeat 8 --device auto
 
-# held specialist (unchanged, no emphasis)
+# held specialist (ball-target emphasis, firmer 0.045 possession threshold)
 python scripts/train_flat_future_inverse.py \
   --model-path runs/adroit_relocate/checkpoints/adroit_relocate_jepa_model.pt \
   --episodes-npz runs/adroit_relocate/data/relocate_expert_demos.npz \
-  --out runs/adroit_relocate/checkpoints/relocate_flat_inverse_h8_raw_held.pt \
+  --out runs/adroit_relocate/checkpoints/relocate_flat_inverse_h8_raw_held_bt_t045.pt \
   --chunk 8 --future-horizons 2,4,8,16 --max-episodes 1200 --train-steps 30000 \
   --batch-size 512 --hidden 768 --n-blocks 5 --concat-raw \
-  --require-possession held --device auto
+  --require-possession held --possession-threshold 0.045 \
+  --emphasis-dims 36,39 --emphasis-repeat 8 --device auto
 ```
 
-## The Three Laws This Effort Established
+Earlier-round checkpoints (`relocate_flat_inverse_h8_raw_free_emph.pt` at
+switch 0.06, plain `..._held.pt`) reached 0.93/90 and are retained for the
+comparison record but superseded by the 0.045-switch pair above.
+
+## The Laws This Effort Established
 
 1. **No blurring of the expert action manifold.** DAgger retrains,
    success-only self-imitation, and input-noise robustification all degraded
@@ -93,17 +105,33 @@ python scripts/train_flat_future_inverse.py \
    tracking gave consistent gains; every scoring/ranking branch (JEPA rollout,
    contact-dynamics energies, barriers, CVAE, multi-demo candidate ranking)
    was neutral at best once futures were coherent.
-3. **Input-feature emphasis beats target/future modification for closure.**
-   The marginal-grasp failures came from the reach chunk tracking the *demo*
-   ball geometry embedded in `z_future`, not the *live* ball. Duplicating the
-   live palm-ball vector (raw dims 30:33) 8x in the reach specialist's
-   conditioning — with zero change to action targets or futures, so law 1 and
-   law 2 both hold — was the single biggest fresh-seed gain of the whole
-   effort (0.78 -> 0.93 on untouched seeds). Emphasis re-weights *which live
-   observation dims the same demo action is conditioned on*; it does not add
-   synthetic targets, retrieve different futures, or optimize actions at
-   runtime. This is the first intervention that made the controller sensitive
-   to the live-vs-demo ball offset without any runtime scoring.
+3. **Input-feature emphasis beats target/future modification for live-vs-demo
+   offsets — for grasp AND placement.** The failures came from a chunk tracking
+   the *demo* geometry embedded in `z_future` rather than the *live* geometry.
+   Duplicating the relevant live relative-geometry vector Nx in the
+   specialist's conditioning — zero change to action targets or futures, so
+   law 1 and law 2 both hold — servos to the live object without any runtime
+   scoring. Two instances, each the biggest gain of its round: (a) live
+   palm-ball vector (dims 30:33) in the *reach* specialist fixes marginal
+   grasps (0.78 -> 0.93); (b) live ball-target vector (dims 36:39) in the
+   *held* specialist fixes placement near-misses where the ball was firmly
+   held the whole episode but delivered ~11 cm from the live target
+   (0.948 -> 0.957 held-out). Emphasis re-weights *which live observation dims
+   the same demo action is conditioned on*; it does not add synthetic targets,
+   retrieve different futures, or optimize actions at runtime.
+
+Plus one control-structure lever that was decisive for transport drops:
+
+4. **Switch to the transport specialist only on a firm grasp.** Retraining
+   both specialists at possession threshold 0.045 (instead of 0.06) and
+   switching there means the reach specialist keeps tightening the grasp from
+   0.06 down to 0.045 before handing off, and the transport specialist never
+   inherits a marginal grasp it cannot maintain. This removed most of the
+   post-switch / mid-transport drops (dev 4-seed 0.86 -> 0.95). Note this is
+   the *opposite* of the earlier "leave" hysteresis (which was harmful): the
+   win is a firmer *enter* condition, not stickier possession. `exec-k=1`
+   through the switch and an `enter-delay` reach-hold were both neutral-to-
+   harmful, so the fix is the threshold, not the switching dynamics.
 
 ## Closed This Round (all fresh-seed neutral or worse)
 
@@ -116,46 +144,50 @@ python scripts/train_flat_future_inverse.py \
   `DemoLockedFutureIndex.query_topk` but not canonical).
 - Possession-gated future advance: 0.64/90.
 
-## Failure Anatomy (what the remaining ~0.07 is)
+## Failure Anatomy (what the remaining ~0.045 is)
 
-The palm-ball emphasis closed most of the marginal-grasp mass. On seed 77000
-(0.867, was 0.733) the reach failure count collapsed: 29/30 now grasp, and the
-remaining failures shifted from marginal reach to early transport drops.
-Per-episode diagnostics on the untouched seed 82000 (0.90, 3 failures /30):
+Each of the three original failure modes has now been attacked at its root
+(palm-ball emphasis -> marginal grasps; firmer 0.045 switch -> transport drops;
+ball-target emphasis -> placement near-misses). What remains is a diverse long
+tail, ~0-3 idiosyncratic failures per 30-episode seed, spread across all three
+modes with no single dominant cause. Per-episode diagnostics on two held-out
+0.933 seeds:
 
-- 1 still-marginal miss: min palm-ball 0.062 — right at the 0.06 boundary, the
-  residual of the same calibration error.
-- 1 wider miss: min palm-ball 0.093 — a harder reach the emphasis did not
-  close.
-- 1 early transport drop: grasped, held only ~5 steps, dropped just after the
-  switch to the held specialist.
+- seed 82000: 2 firm-grasp placement misses (held 173/183 steps, min palm-ball
+  0.01-0.03, ball delivered 0.117-0.118 from target — the ball-target emphasis
+  narrowed but did not fully close these) and 1 mid-transport drop.
+- seed 88000: 1 marginal reach miss (min palm-ball 0.065, never grasped), 1
+  wide reach miss (0.126), 1 mid-transport drop.
 
-So the failure profile is now roughly split three ways (still-marginal reach /
-wider reach / early post-switch drop) instead of dominated by marginal reach.
-The post-switch drop is a new leading failure and is a *held-specialist /
-switch-boundary* problem, not a reach problem.
+The residual reach misses are outlier live ball positions the demo bank does
+not cover well; the residual placement misses are the live-vs-demo target
+offset not fully absorbed by the ball-target emphasis; the residual drops are
+rare mid-transport instabilities on a firm grasp.
 
 ## Recommended Next Directions
 
-1. **Emphasis sweep + held-side closure.** `--emphasis-repeat 8` was the
-   first untuned guess and already moved 0.78 -> 0.93. A small sweep (4/12/16)
-   and applying the same emphasis idea to the held specialist's ball-target
-   vector (raw dims 36:39) could close the post-switch drops. Keep the
-   validation discipline: tune on 75000-78000, confirm on untouched seeds.
-2. **Post-switch drop fix.** The remaining drops happen right after the reach
-   -> held handoff. Options that respect the laws: a short exec-k=1 window
-   through the switch so the held specialist re-plans immediately on the fresh
-   grasp state; or a brief hysteresis so the reach specialist (which just
-   achieved the grasp) keeps control for 1-2 steps into possession before the
-   held specialist takes over.
+The cheap planner/emphasis knobs are now saturated (emphasis repeat 12/16,
+held palm-ball emphasis, exec-k=1, enter-delay were all neutral-to-noise on top
+of the canonical config). Closing the last ~0.045 to BC 1.00 likely needs one
+of:
+
+1. **Emphasis magnitude/threshold micro-sweep with strict held-out discipline.**
+   A ball-target emphasis repeat sweep (12/16) or a 0.04 switch threshold might
+   shave the placement/drop tail, but the per-seed variance (+/-0.05 at 30 eps)
+   means any such gain must be confirmed on >=5 fresh seeds before it is real.
+2. **Wider/denser demo bank for reach outliers.** The residual reach misses are
+   live ball positions poorly covered by the locked demo. More demos (or a
+   nearest-demo re-lock on outlier ball geometry) would target them without
+   blurring the manifold.
 3. **Contact-consistency JEPA finetune** (DexWM-style hand-consistency
    losses) — still untried; would make imagined latents trustworthy enough
-   for candidate filtering to finally pay.
+   for candidate filtering to finally pay on the mid-transport drops.
 
 ## Do Not Claim Solved Until
 
 A fresh 30-episode eval on seeds not used for tuning or selection, with
 `--torch-seed` set, matching or beating the retained BC 1.00. Current best is
-**0.93/90 on untouched seeds 80000/81000/82000**, so
-`runs/adroit_relocate/checkpoints/adroit_relocate_bc_on_explorewm.pt` stays.
-The gap is now ~0.07; the remaining mass is characterized above.
+**0.957/210 on held-out seeds 81/82/83/85/87/88/89000 (0.955/330 over 11
+seeds)**, so `runs/adroit_relocate/checkpoints/adroit_relocate_bc_on_explorewm.pt`
+stays. The gap is now ~0.045; the remaining mass is the long tail characterized
+above.

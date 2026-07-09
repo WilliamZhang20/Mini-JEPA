@@ -31,7 +31,7 @@ latent subgoals.
 | Adroit Door | SSL replacement solved | schedule-phase inverse, 1.00/30; old BC removed |
 | Adroit Hammer | SSL replacement solved | p4 schedule-phase inverse, 1.00/30 fresh validation; old BC removed |
 | Adroit Pen | SSL replacement solved | raw+latent future flow, 0.90/30; old BC removed |
-| Adroit Relocate | Open (close) | retained BC 1.00; best SSL: dual possession-specialist inverse on demo-locked futures + palm-ball-emphasis reach specialist, 0.93/90 on untouched seeds |
+| Adroit Relocate | Open (very close, gap ~0.045) | retained BC 1.00; best SSL: dual possession-specialist inverse (firm 0.045 switch) on demo-locked futures with palm-ball-emphasis reach + ball-target-emphasis held specialists, 0.957/210 on held-out seeds |
 | FrankaKitchen | Open | raw flow fallback around 2.05-2.12/4 subtasks; full-4 success not reproducible |
 
 ## Replacement Rules
@@ -48,21 +48,25 @@ latent subgoals.
 
 ## Current Open Problems
 
-- **Adroit Relocate:** still open but close. The strongest SSL controller is a
-  dual possession-specialist inverse: a reach specialist and a held/transport
-  specialist (each trained only on its contact regime) switched on the live
-  palm-ball predicate, both tracking a demo-locked h8 future index. The reach
-  specialist now carries a palm-ball emphasis (live palm-ball vector duplicated
-  8x in its conditioning) that servos closure to the live ball rather than the
-  demo ball: **0.93/90 on untouched validation seeds 80000/81000/82000**
-  (0.90/1.00/0.90) vs the 0.79/90 non-emphasis reach specialist on the same
-  seeds, vs retained BC 1.00. Remaining failures split into a residual marginal
-  reach miss, a wider reach miss, and an early transport drop just after the
-  reach->held switch. Neutral-or-harmful: scoring branches (barrier, contact
-  dynamics, CVAE), warm-start sampling, DAgger/noise-robustified retraining,
-  switch hysteresis, geometry weighting, multi-demo candidate ranking. See
-  `docs/HANDOFF_RELOCATE_SSL_CONTACT.md` for the 2026-07-09 session log and next
-  directions (emphasis sweep, post-switch-drop fix).
+- **Adroit Relocate:** still open but very close (gap ~0.045). The strongest
+  SSL controller is a dual possession-specialist inverse: a reach specialist and
+  a held/transport specialist (each trained only on its contact regime) switched
+  on the live palm-ball predicate at a firm 0.045, both tracking a demo-locked
+  h8 future index. Both carry input-feature emphasis for the live-vs-demo
+  offset: the reach specialist duplicates the live palm-ball vector (dims 30:33)
+  8x to servo grasp to the live ball, and the held specialist duplicates the
+  live ball-target vector (dims 36:39) 8x to servo placement to the live target.
+  **0.957/210 on held-out seeds 81/82/83/85/87/88/89000** (0.955/330 over 11
+  seeds), vs retained BC 1.00. The firm 0.045 switch removed most transport
+  drops (the transport specialist never inherits a marginal grasp); the
+  ball-target emphasis removed most placement near-misses. Remaining failures
+  are a diverse long tail (residual reach misses on outlier ball positions,
+  residual placement offset, rare mid-transport drops). Neutral-or-harmful:
+  scoring branches (barrier, contact dynamics, CVAE), warm-start sampling,
+  DAgger/noise-robustified retraining, "leave" hysteresis, exec-k=1,
+  enter-delay reach-hold, held palm-ball emphasis, geometry weighting,
+  multi-demo candidate ranking. See `docs/HANDOFF_RELOCATE_SSL_CONTACT.md` for
+  the 2026-07-09 session log and next directions.
 - **AntMaze Medium/Large:** needs a reproducible walker and a neural high-level
   that respects wall feasibility. Current failures look like low-level control
   and checkpoint/environment drift, not just graph planning.

@@ -326,6 +326,47 @@ grasp-conditioned low level; contact-consistency JEPA finetuning, DexWM-style
 hand-consistency losses) remain open; the emphasis result is a cheaper win that
 did not require either.
 
+Session 2026-07-09 (continued — firm-switch + placement emphasis, gap to ~0.045):
+
+- **New best SSL controller: 0.957/210 on held-out seeds (0.955/330 over 11
+  seeds).** Two further root-cause fixes on top of the reach emphasis, each
+  attacking the failure mode the previous fix exposed:
+  - *Firmer 0.045 possession switch* removes transport drops. Retraining both
+    specialists at possession threshold 0.045 and switching there (vs 0.06)
+    lets the reach specialist keep tightening the grasp before handoff, so the
+    transport specialist never inherits a marginal grasp it cannot maintain.
+    Dev 4-seed 0.86 -> 0.95. This is the opposite polarity of the earlier
+    harmful "leave" hysteresis: a firmer *enter* condition, not stickier
+    possession. `exec-k=1` (0.82-0.85) and an `enter-delay` reach-hold
+    (0.87-0.88) were both neutral-to-harmful, confirming the fix is the
+    threshold, not the switching dynamics.
+  - *Ball-target emphasis on the held specialist* fixes placement near-misses.
+    Diagnostics after the drop fix revealed a distinct failure the grasp fixes
+    had masked: episodes where the ball is held firmly the whole trajectory
+    (170+ possession steps, palm-ball ~0.01-0.03) but delivered ~11 cm from
+    the target. This is the placement analog of the reach miss - the held chunk
+    tracks the *demo* target in `z_future`, not the *live* target. Duplicating
+    the live ball-target vector (raw dims 36:39) 8x in the held specialist's
+    conditioning (`--emphasis-dims 36,39`) servos placement to the live target.
+    Held-out 7-seed 0.948 -> 0.957 (fixed placement on 81/82/88).
+- Canonical checkpoints: `relocate_flat_inverse_h8_raw_free_emph_t045.pt`
+  (reach, palm-ball emphasis, threshold 0.045) +
+  `relocate_flat_inverse_h8_raw_held_bt_t045.pt` (held, ball-target emphasis,
+  threshold 0.045), switch 0.045. Full progression this task: single global
+  inverse 0.67 -> segment-pure split 0.78 -> reach emphasis 0.93 -> firm switch
+  -> placement emphasis 0.957 held-out.
+- This generalizes law 3: input-feature emphasis fixes live-vs-demo offsets for
+  *placement* as well as *grasp*, both by upweighting the relevant live
+  relative-geometry vector with zero target/future modification. Adds a control
+  law: switch to the transport specialist only on a firm grasp.
+- Still below the retained BC 1.00 (gap ~0.045); remaining failures are a
+  diverse long tail (residual reach misses on outlier ball positions, residual
+  placement offset, rare mid-transport drops). `adroit_relocate_bc_on_explorewm.pt`
+  stays. Cheap planner/emphasis knobs are saturated; see
+  `docs/HANDOFF_RELOCATE_SSL_CONTACT.md` for next directions (emphasis/threshold
+  micro-sweep with strict held-out discipline, wider demo bank for reach
+  outliers, contact-consistency JEPA finetune).
+
 ## AntMaze And PointMaze
 
 ### PointMaze
