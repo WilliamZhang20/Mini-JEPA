@@ -27,7 +27,14 @@ The repo is now organized around a simple boundary:
   manipulation, and striking tasks.
 - `jepa_robotics/algos/`: reusable SSL latent-control pieces:
   - `priors.py`: inverse action-chunk priors and diffusion/flow action-prior
-    networks.
+    networks, plus the shared sampler used by diffusion, flow, and residual
+    refiners.
+  - `contact.py`: contact-trace models and scoring for contact-aware SSL
+    planning: the Relocate conditional VAE over
+    `p(contact_trace | z_t, raw_t, action_chunk)` and the mode-aware
+    possession trust barrier used for candidate filtering.
+  - `futures.py`: future-target selection strategies, currently the
+    demo-locked future index used for receding-horizon demo tracking.
   - `phase.py`: self-supervised progress phase features and phase-constrained
     future lookup.
   - `hwm.py`: same-latent hierarchical world model components inspired by the
@@ -45,6 +52,14 @@ When adding a new experiment:
    compatibility shim. Promote duplicated code into the package first.
 4. Preserve existing script filenames when possible because many run records and
    docs cite exact commands.
+
+Current coupled-prior scripts:
+
+- `scripts/train_flow_residual_refiner.py`: trains a residual diffusion/flow
+  model around a future-conditioned flow proposal.
+- `scripts/eval_flow_residual_refiner.py`: evaluates flow proposals, refined
+  proposals, and optionally the unrefined proposals in the same JEPA/state-scored
+  candidate set.
 
 This is why the current cleanup moves shared inverse/flow/phase/HWM pieces into
 `jepa_robotics/algos` while leaving the historical command names in `scripts/`.

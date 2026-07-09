@@ -31,7 +31,7 @@ latent subgoals.
 | Adroit Door | SSL replacement solved | schedule-phase inverse, 1.00/30; old BC removed |
 | Adroit Hammer | SSL replacement solved | p4 schedule-phase inverse, 1.00/30 fresh validation; old BC removed |
 | Adroit Pen | SSL replacement solved | raw+latent future flow, 0.90/30; old BC removed |
-| Adroit Relocate | Open | retained BC 1.00; best SSL variants capped around 0.40/10 |
+| Adroit Relocate | Open (close) | retained BC 1.00; best SSL: dual possession-specialist inverse on demo-locked futures + palm-ball-emphasis reach specialist, 0.93/90 on untouched seeds |
 | FrankaKitchen | Open | raw flow fallback around 2.05-2.12/4 subtasks; full-4 success not reproducible |
 
 ## Replacement Rules
@@ -48,9 +48,21 @@ latent subgoals.
 
 ## Current Open Problems
 
-- **Adroit Relocate:** needs object/contact-aware grasp, transport, and place
-  structure. Generic flat future inverse/flow and temporal phases do not recover
-  reliable ball possession.
+- **Adroit Relocate:** still open but close. The strongest SSL controller is a
+  dual possession-specialist inverse: a reach specialist and a held/transport
+  specialist (each trained only on its contact regime) switched on the live
+  palm-ball predicate, both tracking a demo-locked h8 future index. The reach
+  specialist now carries a palm-ball emphasis (live palm-ball vector duplicated
+  8x in its conditioning) that servos closure to the live ball rather than the
+  demo ball: **0.93/90 on untouched validation seeds 80000/81000/82000**
+  (0.90/1.00/0.90) vs the 0.79/90 non-emphasis reach specialist on the same
+  seeds, vs retained BC 1.00. Remaining failures split into a residual marginal
+  reach miss, a wider reach miss, and an early transport drop just after the
+  reach->held switch. Neutral-or-harmful: scoring branches (barrier, contact
+  dynamics, CVAE), warm-start sampling, DAgger/noise-robustified retraining,
+  switch hysteresis, geometry weighting, multi-demo candidate ranking. See
+  `docs/HANDOFF_RELOCATE_SSL_CONTACT.md` for the 2026-07-09 session log and next
+  directions (emphasis sweep, post-switch-drop fix).
 - **AntMaze Medium/Large:** needs a reproducible walker and a neural high-level
   that respects wall feasibility. Current failures look like low-level control
   and checkpoint/environment drift, not just graph planning.
@@ -62,3 +74,5 @@ latent subgoals.
 - `docs/ARCHITECTURE.md`: package/script boundary and directory organization.
 - `docs/EXPERIMENT_LEDGER.md`: tried axes, results, and why unsolved cases remain
   below previous best/SOTA.
+- `docs/HANDOFF_RELOCATE_SSL_CONTACT.md`: downstream handoff for the unsolved
+  Relocate SSL contact-planning gap.

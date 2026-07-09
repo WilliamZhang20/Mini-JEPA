@@ -68,3 +68,68 @@ def make_ddpm(T, device):
     alphas = 1.0 - betas
     abar = torch.cumprod(alphas, 0)
     return {"betas": betas, "alphas": alphas, "abar": abar, "T": T}
+
+
+@torch.no_grad()
+def sample_action_chunks(
+    net: nn.Module,
+    ddpm: dict,
+    cond: torch.Tensor,
+    chunk_dim: int,
+    device,
+    *,
+    objective: str = "diffusion",
+    flow_steps: int = 16,
+    cfg_weight: float = 1.0,
+    init_noise_scale: float = 1.0,
+    warm_init: torch.Tensor | None = None,
+    warm_tau: float = 0.0,
+) -> torch.Tensor:
+    """Sample action chunks from a diffusion or rectified-flow prior.
+
+    The same sampler is used for primitive action priors and residual refiners.
+    ``objective="flow"`` integrates a velocity field from noise to data;
+    ``objective="diffusion"`` runs the DDPM reverse process.
+
+    ``warm_init`` (flow objective only) warm-starts sampling from a previous
+    plan for receding-horizon temporal coherence: integration begins at time
+    ``warm_tau`` in (0, 1) from the rectified-flow interpolation
+    ``(1 - warm_tau) * noise + warm_tau * warm_init``, so samples stay near
+    the shifted previous chunk while re-noising enough to adapt.
+    """
+
+    B = cond.shape[0]
+    guided = cfg_weight != 1.0
+    null = torch.zeros_like(cond) if guided else None
+
+    def predict(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        out = net(x, t, cond)
+        if guided:
+            out_u = net(x, t, null)
+            out = out_u + cfg_weight * (out - out_u)
+        return out
+
+    if objective == "flow":
+        T = ddpm["T"]
+        noise = torch.randn(B, chunk_dim, device=device) * init_noise_scale
+        if warm_init is not None and warm_tau > 0.0:
+            tau0 = min(max(float(warm_tau), 0.0), 0.999)
+            x = (1.0 - tau0) * noise + tau0 * warm_init
+        else:
+            tau0 = 0.0
+            x = noise
+        n_steps = max(1, flow_steps)
+        dt = (1.0 - tau0) / float(n_steps)
+        for i in range(n_steps):
+            tau = torch.full((B,), tau0 + i * dt, device=device)
+            x = x + dt * predict(x, tau * T)
+        return x
+
+    betas, alphas, abar, T = ddpm["betas"], ddpm["alphas"], ddpm["abar"], ddpm["T"]
+    a = torch.randn(B, chunk_dim, device=device) * init_noise_scale
+    for t in reversed(range(int(T))):
+        tt = torch.full((B,), t, device=device, dtype=torch.long)
+        eps = predict(a, tt)
+        mean = (a - betas[t] / torch.sqrt(1 - abar[t]) * eps) / torch.sqrt(alphas[t])
+        a = mean + torch.sqrt(betas[t]) * torch.randn_like(a) if t > 0 else mean
+    return a

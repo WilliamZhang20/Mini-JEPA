@@ -80,6 +80,36 @@ and are documented in
   same-latent hierarchy attempt inspired by arXiv:2604.03208. A high-level
   macro world model predicts future JEPA latents from learned macro-actions; the
   predicted latent subgoal is passed to a future-conditioned inverse low level.
+- `scripts/train_flow_residual_refiner.py` / `scripts/eval_flow_residual_refiner.py`:
+  coupled flow+diffusion experiment. Flow proposes global future-conditioned
+  action chunks; a residual diffusion/flow refiner predicts local corrections
+  conditioned on `(z_t, z_future, a_flow)`, and JEPA/state scoring gates refined
+  vs unrefined candidates.
+- `scripts/train_relocate_contact_probe.py`: self-supervised Relocate probe
+  predicting palm-ball and ball-target distances from frozen JEPA latents. This
+  is a fine-state scoring attempt, not an action-label policy.
+- `scripts/collect_flat_future_flow.py` / `scripts/collect_adroit_bc_rollouts.py`:
+  data-generation utilities for SSL replacement attempts. They save successful
+  trajectories so future-conditioned flow/inverse priors can train on transition
+  evidence; runtime evaluation still uses the SSL prior, not the collector
+  policy.
+- `scripts/train_relocate_rollout_contact_probe.py`: trains the Relocate
+  fine-state probe on JEPA-predicted rollout latents rather than true encoder
+  latents.
+- `scripts/train_relocate_contact_dynamics.py`: trains an action-conditioned
+  contact dynamics head on SSL rollouts, predicting palm-ball and ball-target
+  traces directly from `(z_t, raw_t, action_chunk)`.
+- `scripts/train_relocate_contact_vae.py`: trains a self-supervised conditional
+  VAE over Relocate contact traces,
+  `p(contact_trace | z_t, raw_t, action_chunk)`. Evaluation can load it through
+  `scripts/eval_flow_residual_refiner.py --relocate-contact-vae-path` to score
+  candidate chunks by sampled contact-mode futures. This is a contact/reachability
+  scorer, not a BC action policy.
+- `scripts/train_relocate_contact_trace_inverse.py` /
+  `scripts/eval_relocate_contact_trace_inverse.py`: contact-trace-conditioned
+  inverse prior. The high level retrieves a demo contact trajectory and the low
+  level predicts an action chunk from `(z_t, z_future, raw_t, raw_future,
+  contact_trace)`.
 - `jepa_robotics/models/`: the action-conditioned JEPA model (recurrent latent
   dynamics, optional K-head ensemble) and the `GoalConditionedPolicy` action
   prior, split into `world_model.py` / `policy.py` / `mlp.py` / `regularizers.py`.
@@ -114,7 +144,7 @@ self-supervised, future-conditioned action planning in latent space:
 | FetchSlide | JEPA-latent TQC/HER | **Not replaced yet.** H24 flow, RL-trial flow, inverse, goal-conditioned inverse, JEPA ranking/refinement, and action scaling all stayed near 0.0-0.1 success; old RL checkpoint retained. |
 | PointMaze | HER/SB3 low level + H-JEPA graph | **Replaced on checked runs** by inverse low level + H-JEPA graph: UMaze/Medium/Large = 1.00/1.00/1.00 over 20-episode checks. |
 | AntMaze | H-JEPA/HIQL/raw+JEPA controller | **Not replaced yet.** Offline SSL inverse low-level reached 0.50 flat / 0.70 H-JEPA on UMaze in earlier checks; the latest 2026-07-06 retest with 70 landmarks was 0.50 flat / 0.60 H-JEPA. Medium/Large HIQL checkpoints were non-reproducible in the current env (0/20 on seed 20000 and 41000). |
-| Adroit | JEPA-latent BC on offline demos | **Partial. Door, Hammer, and Pen replaced.** Door schedule-phase inverse reached 1.00/30 and old `door_bc_on_explorewm.pt` was removed. Hammer p4 schedule-phase inverse reached 1.00/30 on a fresh seed-64000 validation and old `adroit_hammer_bc_on_explorewm.pt` was removed. Pen raw+latent future flow reached 0.90/30 and old `adroit_pen_bc_on_explorewm.pt` was removed. Relocate remains capped around 0.40/10 with SSL variants, so BC is retained there. |
+| Adroit | JEPA-latent BC on offline demos | **Partial. Door, Hammer, and Pen replaced.** Door schedule-phase inverse reached 1.00/30 and old `door_bc_on_explorewm.pt` was removed. Hammer p4 schedule-phase inverse reached 1.00/30 on a fresh seed-64000 validation and old `adroit_hammer_bc_on_explorewm.pt` was removed. Pen raw+latent future flow reached 0.90/30 and old `adroit_pen_bc_on_explorewm.pt` was removed. Relocate remains below BC; the best SSL controller (dual possession-specialist inverse tracking a demo-locked future index, with a palm-ball-emphasis reach specialist for closure micro-correction) reached 0.93/90 on untouched validation seeds, so BC is retained there. |
 | FrankaKitchen | skill-hierarchy / self-imitation logs | **Not solved under current code.** The previously logged `kitchen_flow_skill_ft3.pt` 0.90 full-4 result is not reproducible now: current checks give 0.10-0.20/4 mean tasks on the logged seeds. A 25-probe sweep found raw flow remains best: 2.12/4 with 0.12 full-4 at `exec-k=8/12` over 8 episodes, and 2.05/4 with 0.00 full-4 over a 20-episode validation using lower flow noise. JEPA latent reward selection was worse (1.10/4 over 10). |
 
 ## A World Model Is Not A Controller
@@ -218,7 +248,7 @@ where possible.
 | Door | 0.00 | **1.00 SSL schedule-phase inverse** over 30; old explore-WM BC removed |
 | Hammer | 0.00 | **1.00 SSL schedule-phase inverse** over 30; old explore-WM BC removed |
 | Pen (in-hand reorientation) | 0.00 | **0.90 SSL raw+latent future flow** over 30; old explore-WM BC removed |
-| Relocate | 0.00 | **1.00 BC**; SSL inverse/flow variants capped at 0.40/10 |
+| Relocate | 0.00 | **1.00 BC**; best contact-aware SSL scorer reached 0.567/30, still below replacement threshold |
 
 Notably the old BC controllers and the new Pen flow prior run on the *same*
 exploratory world model (trained on random data). The encoder is
@@ -241,7 +271,10 @@ phase scheduling.
 
 Second 2026-07-07 orthogonal sweep:
 Relocate horizon/scale variants stayed at 0.00/3 (`h8` at action-scale 0.8,
-`h16` at action-scale 1.2). Kitchen raw flow with more commitment regressed to
+`h16` at action-scale 1.2). Later contact-aware scorers improved some short
+slices, but the best 30-episode contact dynamics run was 0.567 and a tiny
+contact-CVAE scorer is only a smoke-test branch so far. Kitchen raw flow with
+more commitment regressed to
 1.40/4 over 5 episodes; Kitchen flat inverse and tiny same-latent HWM both
 scored 0. Hammer phase inverse p4 later validated at 1.00/30, replacing the old
 BC artifact; p6 was weaker. AntMaze UMaze showed

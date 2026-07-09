@@ -5,12 +5,14 @@ models, indexing logic, and planning helpers live here so Fetch, Adroit, Maze,
 and Kitchen experiments share the same JEPA/SSL control primitives.
 """
 
+from .contact import ContactTraceCVAE
 from .hwm import LatentMacroPredictor, MacroActionEncoder, sample_macro_dataset
 from .phase import PhaseFutureIndex, batch_phase_features, phase_features, phase_id
-from .priors import EpsNet, InversePrior, make_ddpm, sinusoidal_embedding
+from .priors import EpsNet, InversePrior, make_ddpm, sample_action_chunks, sinusoidal_embedding
 
 __all__ = [
     "EpsNet",
+    "ContactTraceCVAE",
     "InversePrior",
     "LatentMacroPredictor",
     "MacroActionEncoder",
@@ -20,5 +22,6 @@ __all__ = [
     "phase_features",
     "phase_id",
     "sample_macro_dataset",
+    "sample_action_chunks",
     "sinusoidal_embedding",
 ]
