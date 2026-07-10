@@ -18,7 +18,7 @@ from jepa_robotics.envs import flatten_obs, make_env
 from jepa_robotics.evaluate import load_jepa_artifact, rollout_policy
 from jepa_robotics.tasks import resolve_task
 from scripts.eval_diffusion_policy import sample_chunk
-from scripts.eval_flat_future_inverse import NearestFutureIndex
+from scripts.eval_flat_future_inverse import NearestFutureIndex, _append_emphasis
 from jepa_robotics.algos.priors import EpsNet, make_ddpm
 
 
@@ -84,6 +84,7 @@ class FlatFlowPolicy:
         parts = [z, z_goal, h_token]
         if bool(self.ckpt.get("concat_raw", False)):
             parts.extend([s, tgt])
+        _append_emphasis(parts, s, self.ckpt)
         cond = torch.cat(parts, dim=-1).repeat(self.candidates, 1)
         chunks = sample_chunk(
             self.flow,

@@ -32,7 +32,7 @@ latent subgoals.
 | Adroit Hammer | SSL replacement solved | p4 schedule-phase inverse, 1.00/30 fresh validation; old BC removed |
 | Adroit Pen | SSL replacement solved | raw+latent future flow, 0.90/30; old BC removed |
 | Adroit Relocate | Open (very close, gap ~0.045) | retained BC 1.00; best SSL: dual possession-specialist inverse (firm 0.045 switch) on demo-locked futures with palm-ball-emphasis reach + ball-target-emphasis held specialists, 0.957/210 on held-out seeds |
-| FrankaKitchen | Open | raw flow fallback around 2.05-2.12/4 subtasks; full-4 success not reproducible |
+| FrankaKitchen | SSL replacement solved (reproducible) | subtask-specialist inverse controller: 0.773 full-4 / ~3.55 mean tasks over 150 eps (6 seeds); held-out 5-seed 0.768/125 |
 
 ## Replacement Rules
 

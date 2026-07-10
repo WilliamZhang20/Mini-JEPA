@@ -48,6 +48,14 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--concat-raw", action="store_true",
                    help="Append normalized current/future states to the latent condition.")
+    p.add_argument("--require-possession", choices=["none", "held", "free"], default="none",
+                   help="Segment-pure flow specialist: 'free' keeps only pairs whose current frame is NOT in possession, 'held' keeps only pairs held at both frames. Splitting the bimodal contact regime de-blurs the expert manifold so flow stops mode-averaging across regimes.")
+    p.add_argument("--possession-dims", default="30,33",
+                   help="Raw-state slice (lo,hi) whose vector norm defines the possession predicate.")
+    p.add_argument("--possession-threshold", type=float, default=0.06)
+    p.add_argument("--emphasis-dims", default=None,
+                   help="Raw-state slice (lo,hi) of the CURRENT state to duplicate --emphasis-repeat extra times in the flow conditioning, servoing samples to the live contact geometry (e.g. palm-ball 30,33) without blurring action targets.")
+    p.add_argument("--emphasis-repeat", type=int, default=0)
     p.add_argument("--seed", type=int, default=97)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
@@ -68,6 +76,10 @@ def main() -> None:
     H = args.chunk
     future_horizons = args.future_horizons or [H]
     max_future = max(max(future_horizons), H)
+    pred_lo, pred_hi = (int(x) for x in args.possession_dims.split(","))
+    emph_lo = emph_hi = None
+    if args.emphasis_dims is not None and args.emphasis_repeat > 0:
+        emph_lo, emph_hi = (int(x) for x in args.emphasis_dims.split(","))
     conds, chunks = [], []
     bank_states, bank_futures = [], []
     with torch.no_grad():
@@ -76,12 +88,17 @@ def main() -> None:
             actions = ep.actions.astype(np.float32)
             if len(actions) < max_future:
                 continue
+            held = np.linalg.norm(states[:, pred_lo:pred_hi], axis=-1) < args.possession_threshold
             norm_states_np = norm.encode(states).astype(np.float32)
             norm_states = torch.from_numpy(norm_states_np).to(dev)
             z_online = wm.encode(norm_states)
             z_target = wm.encode_target(norm_states)
             for t in range(len(actions) - max_future + 1):
                 for future_h in future_horizons:
+                    if args.require_possession == "held" and not (held[t] and held[t + future_h]):
+                        continue
+                    if args.require_possession == "free" and held[t]:
+                        continue
                     h_token = torch.tensor(
                         [float(future_h) / float(max(future_horizons))],
                         dtype=z_online.dtype,
@@ -95,6 +112,8 @@ def main() -> None:
                                 torch.from_numpy(norm_states_np[t + future_h]).to(dev),
                             ]
                         )
+                    if emph_lo is not None:
+                        parts.append(torch.from_numpy(norm_states_np[t, emph_lo:emph_hi]).to(dev).repeat(args.emphasis_repeat))
                     conds.append(torch.cat(parts, dim=-1))
                     chunks.append(torch.from_numpy(actions[t : t + H].reshape(-1)).to(dev))
                 bank_states.append(states[t])
@@ -163,6 +182,10 @@ def main() -> None:
             "conditioning": "z_t_z_future",
             "future_horizons": future_horizons,
             "concat_raw": bool(args.concat_raw),
+            "require_possession": args.require_possession,
+            "possession_threshold": float(args.possession_threshold),
+            "emphasis_dims": args.emphasis_dims if emph_lo is not None else None,
+            "emphasis_repeat": int(args.emphasis_repeat) if emph_lo is not None else 0,
             "bank_states": bank_states_np,
             "bank_futures": bank_futures_np,
             "model_path": str(args.model_path),
