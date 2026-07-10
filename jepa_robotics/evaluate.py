@@ -698,6 +698,26 @@ def load_jepa_artifact(path: Path, device: torch.device):
         mean=np.asarray(artifact["normalizer"]["mean"], dtype=np.float32),
         std=np.asarray(artifact["normalizer"]["std"], dtype=np.float32),
     )
+    if str(config.get("arch", "mlp")) == "dexterous":
+        # Tokenized transformer world model for high-DoF dexterous hands.
+        from .models import DexterousJEPA
+
+        cd = config.get("contact_dims")
+        model = DexterousJEPA(
+            state_dim=spec.state_dim,
+            action_dim=spec.action_dim,
+            latent_dim=int(config["latent_dim"]),
+            d_model=int(config.get("d_model", 256)),
+            enc_depth=int(config.get("enc_depth", 4)),
+            dyn_depth=int(config.get("dyn_depth", 4)),
+            heads=int(config.get("heads", 8)),
+            max_horizon=int(config["max_horizon"]),
+            ensemble_heads=int(config.get("ensemble_heads", 1)),
+            contact_dims=tuple(cd) if cd else None,
+        ).to(device)
+        model.load_state_dict(artifact["model"])
+        model.eval()
+        return model, normalizer, spec, config
     model = ActionConditionedJEPA(
         state_dim=spec.state_dim,
         action_dim=spec.action_dim,
