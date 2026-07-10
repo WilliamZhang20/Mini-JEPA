@@ -289,6 +289,10 @@ def main() -> None:
                    help="demo_locked: re-lock to another demo when its weighted match beats the locked demo by this margin (recovery after drops).")
     p.add_argument("--torch-seed", type=int, default=None)
     p.add_argument("--out", type=Path, default=None)
+    p.add_argument("--video-out", type=Path, default=None, help="Save an mp4 of the first successful episode.")
+    p.add_argument("--width", type=int, default=640)
+    p.add_argument("--height", type=int, default=480)
+    p.add_argument("--fps", type=int, default=30)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
 
@@ -339,7 +343,11 @@ def main() -> None:
         )
     else:
         future_index = NearestFutureIndex(np.asarray(ckpt["bank_states"]), np.asarray(ckpt["bank_futures"]), norm)
-    env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
+    render = args.video_out is not None
+    env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps,
+                   render_mode="rgb_array" if render else None,
+                   width=args.width if render else None, height=args.height if render else None)
+    video_saved = False
     policy = FlatInversePolicy(
         wm=wm, normalizer=norm, spec=spec, prior=prior, ckpt=ckpt, future_index=future_index,
         device=dev, possession_prior=possession_prior, possession_ckpt=possession_ckpt,
@@ -363,11 +371,27 @@ def main() -> None:
         ep_states = [flatten_obs(obs).copy()]
         term = trunc = False
         info = {}
+        capture = render and not video_saved
+        frames = []
+        if capture:
+            f = env.render()
+            if f is not None:
+                frames.append(f)
         while not (term or trunc):
             obs, _, term, trunc, info = env.step(policy.act(obs, env))
             ep_states.append(flatten_obs(obs).copy())
+            if capture:
+                f = env.render()
+                if f is not None:
+                    frames.append(f)
         success = float(info.get("is_success", info.get("success", 0.0)))
         successes.append(success)
+        if capture and success > 0.5 and frames:
+            import imageio.v2 as imageio
+            args.video_out.parent.mkdir(parents=True, exist_ok=True)
+            imageio.mimsave(args.video_out, frames, fps=args.fps, format="FFMPEG")
+            video_saved = True
+            print(json.dumps({"event": "video_saved", "path": str(args.video_out), "episode": ep}), flush=True)
         if args.log_episodes:
             traj = np.asarray(ep_states, dtype=np.float32)
             palm_ball = np.linalg.norm(traj[:, 30:33], axis=-1)

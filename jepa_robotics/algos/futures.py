@@ -39,6 +39,7 @@ class DemoLockedFutureIndex:
         self.starts = np.stack([ne[0] for ne in self.norm_episodes])
         state_dim = self.starts.shape[1]
         self.dim_weights = np.ones(state_dim, dtype=np.float32)
+        self.geom_dims = geom_dims
         if geom_dims is not None and geom_weight != 1.0:
             lo, hi = geom_dims
             # Upweight the task-geometry dims (e.g. palm-ball / ball-target
@@ -114,6 +115,27 @@ class DemoLockedFutureIndex:
             if not satisfied:
                 target_idx = min(target_idx, max(self.first_satisfied[self.locked], min(idx + 1, len(ep) - 1)))
         return ep[target_idx]
+
+    def match_distance(self, state: np.ndarray, normalizer) -> float:
+        """Weighted distance from ``state`` to the nearest state in ANY of this
+        index's demo segments (non-mutating; does not touch the lock).
+
+        Used by an order-agnostic high level to score how reachable this
+        subtask is from the current live state, so the scheduler can pick the
+        most-reachable uncompleted subtask instead of following a fixed order.
+        Distance is computed on the geom slice only (the reachability-determining
+        feature, e.g. arm pose) when one was configured, so object-state dims do
+        not dominate the reachability judgement.
+        """
+        x = normalizer.encode(state).astype(np.float32)
+        if self.geom_dims is not None:
+            lo, hi = self.geom_dims
+            xs = x[lo:hi][None]
+            best = min(float(np.linalg.norm(ne[:, lo:hi] - xs, axis=1).min()) for ne in self.norm_episodes)
+        else:
+            w = self.dim_weights[None]
+            best = min(float(np.linalg.norm((ne - x[None]) * w, axis=1).min()) for ne in self.norm_episodes)
+        return best
 
     def query_topk(self, state: np.ndarray, normalizer, k: int) -> list[np.ndarray]:
         """Futures from the locked demo plus the best-matching other demos.

@@ -17,13 +17,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from jepa_robotics.data import collect_episodes, load_episodes_npz
 from jepa_robotics.envs import make_env, obs_spec_from_env
 from jepa_robotics.tasks import resolve_task
-from scripts.eval_hjepa_maze import LowLevelBC, LowLevelInverse, build_subgoal_graph, dijkstra_path
+from scripts.eval_hjepa_maze import LowLevelBC, LowLevelInverse, LowLevelFlow, build_subgoal_graph, dijkstra_path
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", required=True)
-    p.add_argument("--low-type", default="bc", choices=["bc", "inverse"])
+    p.add_argument("--low-type", default="bc", choices=["bc", "inverse", "flow"])
     p.add_argument("--bc-policy", type=Path, default=None)
     p.add_argument("--inverse-policy", type=Path, default=None)
     p.add_argument("--jepa-model", type=Path, required=True)
@@ -63,7 +63,11 @@ def main() -> None:
     landmarks, adj = build_subgoal_graph(episodes, spec, args.landmarks, args.k_reach, seed=args.seed)
 
     env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
-    if args.low_type == "inverse":
+    if args.low_type == "flow":
+        if args.bc_policy is None:
+            raise ValueError("--low-type flow requires --bc-policy (the flow-walker checkpoint)")
+        low = LowLevelFlow(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high, device=args.device)
+    elif args.low_type == "inverse":
         if args.inverse_policy is None:
             raise ValueError("--low-type inverse requires --inverse-policy")
         low = LowLevelInverse(args.jepa_model, args.inverse_policy, env.action_space.low, env.action_space.high, device=args.device)

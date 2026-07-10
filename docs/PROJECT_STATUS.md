@@ -25,14 +25,15 @@ latent subgoals.
 | FetchPush | SSL replacement solved | flow prior + JEPA chunk selection, 1.00 |
 | FetchPickAndPlace | SSL replacement solved | inverse prior + JEPA chunk selection, 1.00 |
 | FetchSlide | Not SSL-replaced | JEPA-latent TQC/HER retained, 0.83 |
-| PointMaze UMaze/Medium/Large | SSL replacement solved on checked runs | H-JEPA + inverse low level, 1.00/1.00/1.00 |
-| AntMaze UMaze | Partially solved | H-JEPA BC low level 0.93 historical; SSL inverse direct low-level can solve short UMaze checks |
-| AntMaze Medium/Large | Open | historical HIQL logs are non-reproducible in current env |
+| PointMaze UMaze/Medium/Large | SSL replacement solved on checked runs | 1.00/1.00/1.00; still on the legacy H-JEPA graph + inverse low level — flow-macro HWM migration pending demo collection (no demo npz on disk yet), mechanical given the AntMaze validation |
+| AntMaze UMaze | SSL replacement solved | HWM flow-macro-prior high level + directed flow walker (no Dijkstra), 0.867/60 |
+| AntMaze Medium | Improved (open) | HWM flow-macro-prior high level + directed flow walker, 0.39/80 (beats graph 0.26 and Gaussian-CEM 0.067); below historical HIQL ~0.77 |
+| AntMaze Large | Improved (open) | HWM flow-macro-prior high level + directed flow walker, 0.18/60 reproducible (was 0.00) |
 | Adroit Door | SSL replacement solved | schedule-phase inverse, 1.00/30; old BC removed |
 | Adroit Hammer | SSL replacement solved | p4 schedule-phase inverse, 1.00/30 fresh validation; old BC removed |
 | Adroit Pen | SSL replacement solved | raw+latent future flow, 0.90/30; old BC removed |
 | Adroit Relocate | Open (very close, gap ~0.045) | retained BC 1.00; best SSL: dual possession-specialist inverse (firm 0.045 switch) on demo-locked futures with palm-ball-emphasis reach + ball-target-emphasis held specialists, 0.957/210 on held-out seeds |
-| FrankaKitchen | SSL replacement solved (reproducible) | subtask-specialist inverse controller: 0.773 full-4 / ~3.55 mean tasks over 150 eps (6 seeds); held-out 5-seed 0.768/125 |
+| FrankaKitchen | SSL replacement solved (reproducible) | subtask-specialist inverse controller: 0.813 full-4 / ~3.63 mean tasks over 150 eps (6 seeds); held-out 5-seed 0.816/125 |
 
 ## Replacement Rules
 
@@ -67,11 +68,52 @@ latent subgoals.
   enter-delay reach-hold, held palm-ball emphasis, geometry weighting,
   multi-demo candidate ranking. See `docs/HANDOFF_RELOCATE_SSL_CONTACT.md` for
   the 2026-07-09 session log and next directions.
-- **AntMaze Medium/Large:** needs a reproducible walker and a neural high-level
-  that respects wall feasibility. Current failures look like low-level control
-  and checkpoint/environment drift, not just graph planning.
-- **FrankaKitchen:** needs a reliable sequential hierarchy. Raw flow can complete
-  about two subtasks, but full sequence success is not stable under current code.
+- **AntMaze Medium/Large (improved 2026-07-10, reproducible):** two SSL
+  upgrades give the first reproducible non-zero Medium in the current env.
+  (1) A **directed-motion goal-delta-emphasis flow-matching walker**
+  (`train_flow_walker.py --directed --emphasis-repeat`) as the low level:
+  UMaze 0.85/60 (was 0.33). (2) A **HWM neural high level with a flow prior over
+  macro-actions** (arXiv:2604.03208 + `train_hwm_macro_flow.py`): sampling macros
+  from a flow conditioned on `(z_high, goal_xy)` keeps the macro search on the
+  feasible demonstrated manifold, fixing the Gaussian-CEM wall-crossing
+  hallucination. On Medium the high-level comparison (same directed walker) is
+  **flow-macro 0.39/80 > empirical graph 0.26 > Gaussian CEM 0.067** -- the
+  neural flow high level is now the best in the repo AND generalizes (no stored
+  reachability table). **This flow-macro HWM + directed flow walker is now the
+  canonical AntMaze controller across all three mazes, replacing the Dijkstra
+  graph: UMaze 0.867/60, Medium 0.39/80, Large 0.18/60** (all first-reproducible
+  or best-in-repo, fully neural). K-step macro lookahead did not help (horizon-2
+  0.25 < horizon-1 0.39 — g's rollout compounds; the greedy 1-hop from feasible
+  flow samples is best). The remaining gap to historical HIQL (Medium ~0.77) is
+  the walker's raw gait speed: far-goal episodes time out within the 1000-step
+  budget. Next: a faster gait; migrate PointMaze off the graph (needs demo
+  collection). See EXPERIMENT_LEDGER for recipes and A/Bs.
+- **FrankaKitchen (SOLVED this session, reproducible):** the Relocate recipe
+  ported directly to the sequential task closes it. Four **segment-pure
+  per-subtask inverse specialists** (microwave/kettle/light switch/slide
+  cabinet), each trained ONLY on transitions the labeler tagged as working
+  toward that subtask (law 1, no blurring), track a **per-subtask demo-locked
+  future index** built from that subtask's demo segments (law 2), and a **firm
+  scheduler** advances to the next specialist only when the env reports the
+  current subtask complete (law 4, firm predicate switch, using ground-truth
+  `info['step_task_completions']`). Two extra levers from this task:
+  (a) **feature-matched emphasis** — emphasize the feature carrying that
+  subtask's dominant servo error: the **robot arm joints (obs 0:9)** for the
+  approach-dominated light switch, the **object qpos dims** for the
+  manipulation-dominated microwave/kettle/slide (law 3, refined: the object dim
+  is near-constant until manipulated, so it carries no approach signal);
+  (b) **arm-pose demo matching + re-lock** (`--match-dims 0,9 --relock-margin
+  0.3`) so the demo lock keys on reachability (arm pose) and recovers from a bad
+  handoff lock — this was the single largest lever (0.65 -> 0.80). A wider light
+  demo bank (`kitchen_subtask_light_arm_wide.pt`, 800 segments) then lifted it to
+  **0.813 full-4 / 150 eps** (6 seeds, 25 eps each: 0.80/0.84/0.76/0.76/0.92/
+  0.80), held-out 5-seed 0.816/125, vs the reproducible raw-flow baseline of
+  0.00 full-4 / 2.05 mean. Task order is not free (an order-agnostic greedy
+  scheduler loses to the fixed canonical order): the demos encode physical
+  dependencies (light switch only reachable from the post-kettle pose).
+  Scripts: `scripts/train_kitchen_subtask_inverse.py`,
+  `scripts/eval_kitchen_subtask_inverse.py`. See
+  `docs/HANDOFF_KITCHEN_SUBTASK_SSL.md`.
 
 ## Canonical Docs
 

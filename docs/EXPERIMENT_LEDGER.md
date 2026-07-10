@@ -424,6 +424,101 @@ Most promising next direction: rebuild a reproducible SSL-conditioned walker,
 then use a hybrid high level: neural reachability proposals constrained by an
 empirical graph or learned wall-feasibility classifier.
 
+Session 2026-07-10 (flow-walker goal-delta emphasis + directed-motion data):
+
+Architecture = the user's target: **H-JEPA subgoal graph high level + rectified
+flow-matching low-level walker** (`--low-type flow`), with two Relocate-style
+upgrades to the walker.
+
+- **Goal-delta emphasis (law 3, locomotion analog).** Duplicate the
+  **(desired_goal - achieved_goal) xy vector** N x in the flow conditioning
+  (`train_flow_walker.py --emphasis-repeat`, applied in `eval_hjepa_maze.py`
+  `LowLevelFlow`) -- the servo DIRECTION, analogous to the palm-ball vector, so
+  the sampled gait chunk heads at the live subgoal instead of averaging over HER
+  directions. UMaze A/B (matched 100k walkers): FLAT 0.40 -> 0.60, H-JEPA
+  0.267 -> 0.333.
+- **Directed-motion data (law 1, no blurring, for a gait).** Default HER
+  relabels to far/arbitrary goals and mixes in wandering/standing segments, so
+  the walker learns a slow, undirected gait -- the AntMaze bottleneck.
+  `build_directed_chunks` (`--directed --max-relabel-h --min-progress`) relabels
+  the goal to a NEARBY future achieved position and keeps a sample only if the
+  ant closes >= `min_progress` xy distance to it over the chunk. This de-blurs
+  the walker toward decisive locomotion and, combined with the graph, is what
+  finally makes Medium non-zero.
+- **Results (H-JEPA graph, directed walker `antmaze_medium_flow_directed.pt`,
+  reach-radius 1.0 / subgoal-timeout 90 / landmarks 40):**
+  - **UMaze: 0.85 / 60 eps** (0.90/0.90/0.75 on seeds 30000/31000/32000), up
+    from 0.33 with the non-directed emphasis walker; near the historical ~0.93.
+  - **Medium: 0.26 / 80 eps** (0.40/0.20/0.20/0.25 on seeds 30000-33000), up
+    from the reproducible 0.00. First reproducible Medium success in the current
+    env, below historical HIQL (~0.77).
+- An even more aggressive "fast" filter (`--min-progress 0.35 --max-relabel-h
+  24`) was WORSE on Medium (0.125/80) -- too little/too-narrow data. The
+  directed walker (`--min-progress 0.2 --max-relabel-h 40`) is the keeper.
+  Denser graph (landmarks 80) and graph-param retunes were within noise.
+- Diagnosis of the remaining Medium gap: the walker locomotes decisively now but
+  its top xy speed is still bounded by the (wandering) demos, so far-goal
+  episodes exhaust the 1000-step budget before the graph path completes -- the
+  ~0.26 is dominated by near/mid goals succeeding and far goals timing out. The
+  ant walker's raw speed remains the limiter; the graph and emphasis are not the
+  bottleneck. Next: a faster gait (better demos / a speed-shaped objective / a
+  stronger AntMaze JEPA), then re-test on Medium/Large.
+
+HWM neural high level (arXiv:2604.03208, "Hierarchical Planning with Latent
+World Models"), 2026-07-10:
+
+- Trained the repo's HWM stack (`train_hjepa_hwm.py`: HighEncoder psi +
+  MacroEncoder GRU + residual MacroPredictor g with VICReg/stop-grad +
+  SubgoalDecoder) on the Medium demos at stride 40. It fits the paper's claim of
+  generalizing macro-dynamics -- **holdout next-macro-latent error ~0.0018**,
+  decoder ~0.0015.
+- Ran it as the paper prescribes: **CEM over K macro-actions rolled through g,
+  scored by decoded terminal position vs goal**, first macro decoded to an xy
+  subgoal, on top of the (unchanged) directed flow walker, with reach-based
+  replanning (`eval_hjepa_hwm.py --low-type flow`, K in 1/2/4, reach-radius 1.0,
+  low-timeout 90).
+- **Result: 0.00-0.067/15 on Medium -- WORSE than the empirical Dijkstra graph
+  (0.26).** Failure mode is exactly the documented one: the decoded-position CEM
+  has no wall model, so it proposes macro-actions whose decoded subgoal heads
+  straight at the goal THROUGH walls; the walker drives into the wall and stalls.
+  K=1 (single feasible hop, minimal compounding) did not help (0.067). The
+  macro-predictor generalizes (low holdout error) but planning against it
+  hallucinates wall-crossing feasibility.
+- On a SINGLE known maze the empirical graph's stored wall-aware reachability
+  beats the pure-latent Gaussian-CEM HWM. The fix is NOT to fall back to the
+  graph but to constrain the macro search to the feasible manifold -- see below.
+
+**Flow macro-action prior (the decisive fix), 2026-07-10:** replace the
+Gaussian-CEM macro sampler with a **rectified-flow prior over macro-actions**
+conditioned on `(z_high, goal_xy)` (`train_hwm_macro_flow.py`;
+`eval_hjepa_hwm.py --macro-flow`). Trained on the frozen HWM's
+`(psi(z_t), achieved_goal_{t+k*N}, macro_encoder(a_{t:t+N}))` tuples, so every
+sampled macro is an ON-MANIFOLD demonstrated transition. Plan = sample N macros
+from the flow, roll each through the frozen g, decode the next subgoal, pick the
+one closest to the goal. Because demos never cross walls, the sampled macros
+never propose wall-crossing subgoals -- the exact failure Gaussian CEM had.
+
+- **Result (directed flow walker low level, 20 eps/seed, seeds 30000-33000):**
+  - Gaussian CEM (paper as-is): 0.067
+  - Dijkstra empirical graph: 0.26 (mean over the same seeds)
+  - **Flow macro-prior, n=16: 0.39 / 80** (0.55/0.30/0.40/0.30); n=32: 0.34/80.
+  The flow high level **beats both the vanilla paper's CEM (6x) and the
+  empirical graph** on Medium, and is a fully neural high level (no stored
+  reachability table -> generalizes to unseen layouts, the paper's win regime).
+- This confirms the flow-on-the-manifold theme one level up: the reason the
+  neural high level "hallucinated wall-crossing feasibility" was the GLOBAL
+  Gaussian macro proposal, not the world model g -- constrain the proposal to
+  the demonstrated macro distribution with a flow prior and the neural high
+  level becomes the best AntMaze high level in the repo. **Canonical AntMaze
+  controller (ALL three mazes) is now HWM + flow macro-prior + directed flow
+  walker, replacing the Dijkstra graph:** UMaze 0.867/60, Medium 0.39/80,
+  Large 0.18/60. Per-maze checkpoints `antmaze_{umaze,medium,large}_hwm_s40.pt`
+  (psi/macro/g/dec) + `..._hwm_macroflow.pt` (macro flow) +
+  `..._flow_directed.pt` (walker); eval `eval_hjepa_hwm.py --low-type flow
+  --macro-flow ... --macro-flow-horizon 1 --reach-radius 1.0 --low-timeout 90`.
+  Remaining gap to HIQL (~0.77 Medium) is still the walker's gait speed on
+  far-goal episodes.
+
 ## FrankaKitchen
 
 Previous best/SOTA in this repo: historical `kitchen_flow_skill_ft3.pt` logs
@@ -464,6 +559,81 @@ subtask-aware and faster to train. Use replay-labeled subtask predicates, cache
 latent banks, train the macro model on successful segments, and gate low-level
 inverse execution by predicted subtask completion instead of terminal latent
 distance alone.
+
+### SOLVED 2026-07-10: subtask-specialist SSL controller (Relocate recipe port)
+
+Direction: port the four Relocate laws to the sequential task.
+`scripts/train_kitchen_subtask_inverse.py` +
+`scripts/eval_kitchen_subtask_inverse.py`.
+
+- **Law 1 (no blurring) -> segment-pure per-subtask specialists.** Four inverse
+  priors, each trained ONLY on transitions the labeler
+  (`kitchen_labeled_v4.npz`, 1233 eps, per-transition subtask one-hot) tagged as
+  working toward that subtask. One global policy blurs four action manifolds and
+  stalls; splitting them is the base win.
+- **Law 2 (future coherence) -> per-subtask demo-locked future index.** Each
+  specialist stores its own demo *segments* and tracks a `DemoLockedFutureIndex`
+  h8 ahead within them.
+- **Law 4 (firm predicate switch) -> ground-truth completion scheduler.** A
+  trivial fixed-order high level advances to the next specialist only when the
+  env reports the current subtask complete (`info['step_task_completions']`).
+  Each subtask becomes a fresh short-horizon problem.
+- **Law 3 refined (feature-matched emphasis).** Emphasize the feature carrying
+  that subtask's dominant servo error, NOT blindly the object dim. The object
+  qpos is near-constant until the object is manipulated, so for the
+  approach-dominated **light switch** the useful emphasis is the **robot arm
+  joints (obs 0:9)** (they determine EE reachability of the fixed switch);
+  for the manipulation-dominated microwave/kettle/slide the **object qpos dims**
+  are right. Same-seed: light with object emphasis 0.55, light with arm emphasis
+  0.65; all-arm 0.50 (arm emphasis hurts the manipulation subtasks). This
+  extends law 3: emphasis dim = the live feature whose error the chunk must
+  null, which is task-phase dependent.
+- **New lever, decisive: arm-pose demo matching + re-lock.** The demo-locked
+  index must key on the reachability-determining feature. Matching on the
+  near-constant object dim (`--geom-weight 3` on obj) scored 0.40; matching on
+  the **arm joints** (`--match-dims 0,9 --geom-weight 3`) scored 0.55; adding
+  **`--relock-margin 0.3`** (re-lock to a better-matching demo when the arm
+  deviates from the locked one) scored **0.80** — recovering the bad
+  kettle->light handoff locks that were the dominant failure. This is the
+  Relocate "re-localization after a drop" idea applied to a subtask handoff.
+
+Obs layout note (cost a retrain): the flat 59-D obs is
+`[robot_obs(18), obj_qpos(21), obj_qvel(20)]`, and `OBS_ELEMENT_INDICES` are
+into the full qpos, so an object at qpos index j lands at **obs index 9+j**
+(microwave 31, kettle 32:39, light switch 26:28, slide 28). The first run used
+the raw qpos indices by mistake.
+
+Neutral-or-harmful: uniform demo matching (`--geom-weight 1`, 0.10-0.30);
+object-dim matching (0.40); patience-based subtask rotation (budget-limited,
+0.00-0.45; low patience disrupts working subtasks); slide-before-light ordering
+(`--order 0,1,3,2`, 0.00 full-4 — light is *worse* approached after slide);
+all-subtask arm emphasis (0.50); exec-k=1 (0.10-0.30).
+
+Result: **0.813 full-4 / 150 eps** (6 seeds 25 eps:
+0.80/0.84/0.76/0.76/0.92/0.80; held-out 5-seed 0.816/125), mean ~3.63/4, vs
+reproducible raw-flow baseline 0.00 full-4 / 2.05 mean. First reproducible
+full-4 success in the repo. Canonical config:
+`--match-dims 0,9 --geom-weight 3.0 --relock-margin 0.3 --exec-k 2
+--target-horizon 8`, specialists mw/kettle/slide = object emphasis, light =
+arm emphasis. See `docs/HANDOFF_KITCHEN_SUBTASK_SSL.md`.
+
+Two follow-on findings (2026-07-10 push):
+
+- **Wider light demo bank: 0.773 -> 0.813** (`kitchen_subtask_light_arm_wide.pt`,
+  `--max-segments 800 --seg-pad 4 --emphasis-repeat 12`). The residual failures
+  were all light-switch approach misses from post-kettle poses the 400-segment
+  bank covered poorly; doubling the bank (relocate next-direction #2) covers
+  more of them. Every seed matched or improved.
+- **Task order is NOT free for this controller (order-agnostic greedy loses).**
+  A greedy scheduler that at every (re)selection picks the most-reachable
+  uncompleted subtask by demo-match distance (arm-pose slice) scored only
+  0.25-0.40 vs 0.75-0.85 for the fixed canonical order. The demos encode strong
+  physical dependencies -- the light switch is only reliably reachable from the
+  post-kettle arm pose, so doing slide/light out of the demonstrated order ruins
+  the approach (light-after-slide is ~0.00). The canonical order that matches
+  the dominant demo order is near-optimal; free ordering is limited by demo
+  coverage, not by the scheduler. `--scheduler greedy` is retained for the
+  record but is not the canonical controller.
 
 ## FetchSlide
 

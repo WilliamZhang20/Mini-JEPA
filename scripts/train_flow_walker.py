@@ -39,6 +39,45 @@ from jepa_robotics.tasks import resolve_task
 from scripts.train_chunked_walker import build_chunks
 
 
+def build_directed_chunks(episodes, spec, normalizer, chunk, rng, *,
+                          max_relabel_h=60, min_progress=0.15):
+    """(state_t with a NEAR relabeled goal, action chunk) kept only when the ant
+    makes real progress toward that goal over the chunk.
+
+    The default HER over the whole trajectory relabels to far/arbitrary goals and
+    mixes in wandering/standing-still segments, so the BC/flow walker learns a
+    slow, undirected gait (the AntMaze bottleneck). This de-blurs the walker
+    toward DECISIVE locomotion (the 'no blurring' law for a gait): relabel the
+    desired goal to a *nearby* future achieved position (t+1..max_relabel_h) and
+    keep the sample only if the achieved xy moves at least ``min_progress`` closer
+    to that goal across the chunk. The emphasized (desired-achieved) direction
+    then always points at a goal the chunk actually advances toward.
+    """
+    gs, ge = spec.obs_dim, spec.obs_dim + spec.goal_dim
+    ds, de = spec.obs_dim + spec.goal_dim, spec.obs_dim + 2 * spec.goal_dim
+    S_list, C_list = [], []
+    for ep in episodes:
+        S, A = ep.states, ep.actions
+        T = len(A)
+        for t in range(T):
+            dh = int(rng.integers(1, max_relabel_h + 1))
+            tf = min(t + dh, len(S) - 1)
+            goal = S[tf, gs:ge]
+            t_end = min(t + chunk, len(S) - 1)
+            progress = float(np.linalg.norm(S[t, gs:ge] - goal) - np.linalg.norm(S[t_end, gs:ge] - goal))
+            if progress < min_progress:
+                continue
+            s = S[t].copy()
+            s[ds:de] = goal
+            chunk_a = A[t: t + chunk]
+            if len(chunk_a) < chunk:
+                pad = np.repeat(chunk_a[-1:], chunk - len(chunk_a), axis=0)
+                chunk_a = np.concatenate([chunk_a, pad], axis=0)
+            S_list.append(s); C_list.append(chunk_a)
+    S = normalizer.encode(np.asarray(S_list, np.float32))
+    return S, np.asarray(C_list, np.float32)
+
+
 def timestep_embed(t, dim):
     half = dim // 2
     freqs = torch.exp(-math.log(10000) * torch.arange(half, device=t.device) / half)
@@ -81,8 +120,20 @@ def main() -> None:
     p.add_argument("--hidden", type=int, default=512)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--her-frac", type=float, default=0.85)
+    p.add_argument("--directed", action="store_true",
+                   help="Use directed-motion data prep (near relabel + progress filter) for a faster, decisive gait instead of whole-trajectory HER.")
+    p.add_argument("--max-relabel-h", type=int, default=60,
+                   help="[directed] relabel the goal to a future achieved position within this many steps.")
+    p.add_argument("--min-progress", type=float, default=0.15,
+                   help="[directed] keep a sample only if the ant closes at least this much xy distance to the relabeled goal over the chunk.")
     p.add_argument("--concat-raw", action="store_true",
                    help="condition on [JEPA latent | raw normalized obs] (kitchen fix for control precision)")
+    p.add_argument("--emphasis-repeat", type=int, default=0,
+                   help="Relocate-style input-feature emphasis: duplicate the (desired_goal - achieved_goal) xy vector this many times in the flow conditioning. This is the servo DIRECTION the walker must move (the locomotion analog of the palm-ball vector), so the sampled gait chunk heads at the live subgoal instead of averaging over HER directions.")
+    p.add_argument("--agent-dims", default="27,29",
+                   help="Normalized-obs slice (lo,hi) of the achieved-goal / agent xy.")
+    p.add_argument("--goal-dims", default="29,31",
+                   help="Normalized-obs slice (lo,hi) of the desired-goal xy.")
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
 
@@ -97,15 +148,24 @@ def main() -> None:
 
     rng = np.random.default_rng(0)
     eps = load_episodes_npz(args.episodes_npz)[: args.max_episodes]
-    S, C = build_chunks(eps, spec, norm, args.chunk, args.her_frac, rng)  # S normalized states, C chunks
+    if args.directed:
+        S, C = build_directed_chunks(eps, spec, norm, args.chunk, rng,
+                                     max_relabel_h=args.max_relabel_h, min_progress=args.min_progress)
+    else:
+        S, C = build_chunks(eps, spec, norm, args.chunk, args.her_frac, rng)  # S normalized states, C chunks
     St = torch.from_numpy(S).to(dev)
     with torch.no_grad():
         Z = torch.cat([wm.encode(St[i:i + 16384]) for i in range(0, len(St), 16384)], 0)
     cond = torch.cat([Z, St], dim=1) if args.concat_raw else Z
+    a_lo, a_hi = (int(x) for x in args.agent_dims.split(","))
+    g_lo, g_hi = (int(x) for x in args.goal_dims.split(","))
+    if args.emphasis_repeat > 0:
+        delta = (St[:, g_lo:g_hi] - St[:, a_lo:a_hi]).repeat(1, args.emphasis_repeat)
+        cond = torch.cat([cond, delta], dim=1)
     Ct = torch.from_numpy(C.reshape(len(C), -1)).to(dev)
     chunk_dim = Ct.shape[1]; cond_dim = cond.shape[1]; N = len(cond)
     print(json.dumps({"event": "flow_data", "n": N, "chunk_dim": chunk_dim, "cond_dim": cond_dim,
-                      "concat_raw": bool(args.concat_raw)}), flush=True)
+                      "concat_raw": bool(args.concat_raw), "emphasis_repeat": int(args.emphasis_repeat)}), flush=True)
 
     net = FlowNet(chunk_dim, cond_dim, args.hidden).to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
@@ -125,7 +185,9 @@ def main() -> None:
     torch.save({"flow": net.state_dict(),
                 "config": {"chunk": args.chunk, "action_dim": spec.action_dim, "hidden": args.hidden,
                            "chunk_dim": chunk_dim, "cond_dim": cond_dim, "latent_dim": int(cfg["latent_dim"]),
-                           "concat_raw": bool(args.concat_raw)}},
+                           "concat_raw": bool(args.concat_raw),
+                           "emphasis_repeat": int(args.emphasis_repeat),
+                           "agent_dims": [a_lo, a_hi], "goal_dims": [g_lo, g_hi]}},
                args.out)
     print(json.dumps({"event": "flow_saved", "path": str(args.out)}), flush=True)
 

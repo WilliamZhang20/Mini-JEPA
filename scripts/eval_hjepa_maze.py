@@ -207,6 +207,13 @@ class LowLevelFlow:
         self.low, self.high = low, high
         self.replan = replan or self.chunk
         self.flow_steps = flow_steps
+        # Relocate-style goal-delta emphasis (locomotion analog): append the
+        # (desired - achieved) xy vector to the conditioning so the sampled gait
+        # chunk heads at the live subgoal. Config read from the checkpoint so a
+        # non-emphasis walker is unchanged.
+        self.emphasis_repeat = int(cfg.get("emphasis_repeat", 0) or 0)
+        self.agent_dims = tuple(cfg.get("agent_dims", [27, 29]))
+        self.goal_dims = tuple(cfg.get("goal_dims", [29, 31]))
         self._buf = []
         self._last_sg = None
 
@@ -219,6 +226,10 @@ class LowLevelFlow:
             with self._torch.no_grad():
                 z = self.model.encode(s)
                 c = self._torch.cat([z, s], dim=1) if self.concat_raw else z
+                if self.emphasis_repeat > 0:
+                    a_lo, a_hi = self.agent_dims; g_lo, g_hi = self.goal_dims
+                    delta = (s[:, g_lo:g_hi] - s[:, a_lo:a_hi]).repeat(1, self.emphasis_repeat)
+                    c = self._torch.cat([c, delta], dim=1)
                 x = self.net.sample(c, self.chunk_dim, self.flow_steps)[0].cpu().numpy()
             chunk = x.reshape(self.chunk, self.action_dim)
             self._buf = list(chunk[: self.replan])

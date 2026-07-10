@@ -78,6 +78,11 @@ class Specialist:
     def reset(self):
         self.future_index.reset()
 
+    def match_distance(self, raw):
+        """How reachable this subtask is from the live state (min weighted
+        distance to any of its demo segments); lower = more reachable."""
+        return self.future_index.match_distance(raw, self.norm)
+
     @torch.no_grad()
     def plan(self, raw, env, action_scale):
         target_state = self.future_index.query(raw, self.norm)
@@ -117,10 +122,16 @@ def main() -> None:
     p.add_argument("--subtask-patience", type=int, default=0,
                    help="If the current subtask does not complete within this many env steps, defer it and rotate to the next uncompleted subtask (0 disables; success needs all 4 in any order).")
     p.add_argument("--order", default="0,1,2,3",
-                   help="Attempt order as subtask indices (0=microwave 1=kettle 2=light 3=slide). Success needs all 4 in any order; e.g. 0,1,3,2 does slide before light.")
+                   help="[fixed scheduler] Attempt order as subtask indices (0=microwave 1=kettle 2=light 3=slide). Success needs all 4 in any order; e.g. 0,1,3,2 does slide before light.")
+    p.add_argument("--scheduler", default="fixed", choices=["fixed", "greedy"],
+                   help="'fixed': follow --order. 'greedy': order-agnostic — at every (re)selection pick the most-reachable uncompleted subtask by demo-match distance.")
     p.add_argument("--max-episode-steps", type=int, default=280)
     p.add_argument("--torch-seed", type=int, default=0)
     p.add_argument("--log-episodes", action="store_true")
+    p.add_argument("--video-out", type=Path, default=None, help="Save an mp4 of the first full-4-success episode.")
+    p.add_argument("--width", type=int, default=640)
+    p.add_argument("--height", type=int, default=480)
+    p.add_argument("--fps", type=int, default=30)
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
@@ -139,8 +150,12 @@ def main() -> None:
         if sp.name != KITCHEN_TASKS[i]:
             print(json.dumps({"event": "warn_order", "slot": i, "expected": KITCHEN_TASKS[i], "got": sp.name}), flush=True)
 
-    env = make_env(task.env_id, seed=args.seed, max_episode_steps=args.max_episode_steps)
+    render = args.video_out is not None
+    env = make_env(task.env_id, seed=args.seed, max_episode_steps=args.max_episode_steps,
+                   render_mode="rgb_array" if render else None,
+                   width=args.width if render else None, height=args.height if render else None)
     order = [int(x) for x in args.order.split(",")]
+    video_saved = False
 
     successes, ntasks = [], []
     for ep in range(args.episodes):
@@ -153,6 +168,12 @@ def main() -> None:
         info = {}
         switches = []
         traj = [flatten_obs(obs).copy()]
+        capture = render and not video_saved
+        frames = []
+        if capture:
+            fr = env.render()
+            if fr is not None:
+                frames.append(fr)
 
         def next_uncompleted(after):
             """Next subtask index in the configured attempt --order not yet done."""
@@ -163,16 +184,33 @@ def main() -> None:
                     return j
             return after
 
-        # Firm scheduler with patience rotation: run the current subtask's
-        # specialist; if it completes, advance to the next uncompleted subtask;
-        # if it stalls for --subtask-patience env steps without completing, defer
-        # it and rotate to the next uncompleted subtask (success needs all 4 in
-        # ANY order, so an unreachable-from-here subtask should be retried later).
-        cur = order[0]
+        def pick_next(after, raw):
+            """Choose the next subtask to attempt. 'fixed' follows --order;
+            'greedy' picks the most-reachable uncompleted subtask by demo-match
+            distance (order-agnostic high level), excluding the one just left."""
+            if args.scheduler == "greedy":
+                cands = [j for j in range(4) if KITCHEN_TASKS[j] not in done_tasks and j != after]
+                if not cands:
+                    cands = [j for j in range(4) if KITCHEN_TASKS[j] not in done_tasks]
+                if not cands:
+                    return after
+                return min(cands, key=lambda j: specialists[j].match_distance(raw))
+            return next_uncompleted(after)
+
+        # Firm scheduler with patience rotation. 'fixed': follow --order, advance
+        # on completion, defer on stall. 'greedy': pick the most-reachable
+        # uncompleted subtask at every (re)selection, so task order is not
+        # assumed (success needs all 4 in ANY order).
+        if args.scheduler == "greedy":
+            cands = [j for j in range(4) if KITCHEN_TASKS[j] not in done_tasks]
+            cur = min(cands, key=lambda j: specialists[j].match_distance(flatten_obs(obs)))
+            specialists[cur].reset()
+        else:
+            cur = order[0]
         steps_on_cur = 0
         while not (term or trunc):
             if KITCHEN_TASKS[cur] in done_tasks:
-                cur = next_uncompleted(cur)
+                cur = pick_next(cur, flatten_obs(obs))
                 steps_on_cur = 0
                 specialists[cur].reset()
                 cached = []
@@ -184,6 +222,10 @@ def main() -> None:
             action = np.clip(cached.pop(0), env.action_space.low, env.action_space.high).astype(np.float32)
             obs, _, term, trunc, info = env.step(action)
             traj.append(flatten_obs(obs).copy())
+            if capture:
+                fr = env.render()
+                if fr is not None:
+                    frames.append(fr)
             steps_on_cur += 1
             newly = set(info.get("step_task_completions", []))
             new_here = newly - done_tasks
@@ -192,12 +234,12 @@ def main() -> None:
                 switches.append((int(info.get("tasks_done", len(done_tasks))), sorted(new_here)))
                 cached = []  # firm switch: drop the rest of the current chunk
                 if KITCHEN_TASKS[cur] in done_tasks and len(done_tasks) < 4:
-                    cur = next_uncompleted(cur)
+                    cur = pick_next(cur, flatten_obs(obs))
                     steps_on_cur = 0
                     specialists[cur].reset()
             elif args.subtask_patience > 0 and steps_on_cur >= args.subtask_patience and len(done_tasks) < 3:
-                # Stalled: defer this subtask, rotate to the next uncompleted one.
-                nxt = next_uncompleted(cur)
+                # Stalled: defer this subtask, rotate to another uncompleted one.
+                nxt = pick_next(cur, flatten_obs(obs))
                 if nxt != cur:
                     switches.append((int(info.get("tasks_done", len(done_tasks))), [f"defer:{KITCHEN_TASKS[cur]}->{KITCHEN_TASKS[nxt]}"]))
                     cur = nxt
@@ -208,6 +250,12 @@ def main() -> None:
         nt = int(info.get("tasks_done", len(done_tasks)))
         successes.append(success)
         ntasks.append(nt)
+        if capture and success > 0.5 and frames:
+            import imageio.v2 as imageio
+            args.video_out.parent.mkdir(parents=True, exist_ok=True)
+            imageio.mimsave(args.video_out, frames, fps=args.fps, format="FFMPEG")
+            video_saved = True
+            print(json.dumps({"event": "video_saved", "path": str(args.video_out), "episode": ep}), flush=True)
         if args.log_episodes:
             tj = np.asarray(traj, dtype=np.float32)
             min_dist = {}
