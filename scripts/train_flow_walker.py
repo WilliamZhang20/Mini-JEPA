@@ -55,7 +55,7 @@ def build_directed_chunks(episodes, spec, normalizer, chunk, rng, *,
     """
     gs, ge = spec.obs_dim, spec.obs_dim + spec.goal_dim
     ds, de = spec.obs_dim + spec.goal_dim, spec.obs_dim + 2 * spec.goal_dim
-    S_list, C_list = [], []
+    S_list, C_list, P_list = [], [], []
     for ep in episodes:
         S, A = ep.states, ep.actions
         T = len(A)
@@ -73,9 +73,9 @@ def build_directed_chunks(episodes, spec, normalizer, chunk, rng, *,
             if len(chunk_a) < chunk:
                 pad = np.repeat(chunk_a[-1:], chunk - len(chunk_a), axis=0)
                 chunk_a = np.concatenate([chunk_a, pad], axis=0)
-            S_list.append(s); C_list.append(chunk_a)
+            S_list.append(s); C_list.append(chunk_a); P_list.append(progress)
     S = normalizer.encode(np.asarray(S_list, np.float32))
-    return S, np.asarray(C_list, np.float32)
+    return S, np.asarray(C_list, np.float32), np.asarray(P_list, np.float32)
 
 
 def timestep_embed(t, dim):
@@ -126,6 +126,8 @@ def main() -> None:
                    help="[directed] relabel the goal to a future achieved position within this many steps.")
     p.add_argument("--min-progress", type=float, default=0.15,
                    help="[directed] keep a sample only if the ant closes at least this much xy distance to the relabeled goal over the chunk.")
+    p.add_argument("--speed-weight", type=float, default=0.0,
+                   help="[directed] bias training sampling toward faster segments: p ~ progress^speed_weight. Keeps slow turning segments (unlike a hard filter) but speeds up the gait. 0 = uniform.")
     p.add_argument("--concat-raw", action="store_true",
                    help="condition on [JEPA latent | raw normalized obs] (kitchen fix for control precision)")
     p.add_argument("--emphasis-repeat", type=int, default=0,
@@ -148,9 +150,10 @@ def main() -> None:
 
     rng = np.random.default_rng(0)
     eps = load_episodes_npz(args.episodes_npz)[: args.max_episodes]
+    prog = None
     if args.directed:
-        S, C = build_directed_chunks(eps, spec, norm, args.chunk, rng,
-                                     max_relabel_h=args.max_relabel_h, min_progress=args.min_progress)
+        S, C, prog = build_directed_chunks(eps, spec, norm, args.chunk, rng,
+                                           max_relabel_h=args.max_relabel_h, min_progress=args.min_progress)
     else:
         S, C = build_chunks(eps, spec, norm, args.chunk, args.her_frac, rng)  # S normalized states, C chunks
     St = torch.from_numpy(S).to(dev)
@@ -164,13 +167,24 @@ def main() -> None:
         cond = torch.cat([cond, delta], dim=1)
     Ct = torch.from_numpy(C.reshape(len(C), -1)).to(dev)
     chunk_dim = Ct.shape[1]; cond_dim = cond.shape[1]; N = len(cond)
+    # Speed-weighted sampling: bias training toward the FASTER directed segments
+    # (higher xy progress per chunk) WITHOUT dropping the slower turning segments,
+    # so the gait gets faster without losing the ability to turn. p ~ progress^w.
+    sample_p = None
+    if prog is not None and args.speed_weight > 0:
+        w = np.clip(prog, 1e-3, None) ** args.speed_weight
+        sample_p = torch.from_numpy((w / w.sum()).astype(np.float32)).to(dev)
     print(json.dumps({"event": "flow_data", "n": N, "chunk_dim": chunk_dim, "cond_dim": cond_dim,
-                      "concat_raw": bool(args.concat_raw), "emphasis_repeat": int(args.emphasis_repeat)}), flush=True)
+                      "concat_raw": bool(args.concat_raw), "emphasis_repeat": int(args.emphasis_repeat),
+                      "speed_weight": float(args.speed_weight)}), flush=True)
 
     net = FlowNet(chunk_dim, cond_dim, args.hidden).to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     for step in range(1, args.steps + 1):
-        idx = torch.randint(0, N, (args.batch_size,), device=dev)
+        if sample_p is not None:
+            idx = torch.multinomial(sample_p, args.batch_size, replacement=True)
+        else:
+            idx = torch.randint(0, N, (args.batch_size,), device=dev)
         x1 = Ct[idx]; c = cond[idx]
         x0 = torch.randn_like(x1)
         t = torch.rand(x1.shape[0], 1, device=dev)

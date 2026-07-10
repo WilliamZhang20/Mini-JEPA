@@ -472,14 +472,19 @@ upgrades to the walker.
   ant walker's raw speed remains the limiter; the graph and emphasis are not the
   bottleneck. Next: a faster gait (better demos / a speed-shaped objective / a
   stronger AntMaze JEPA), then re-test on Medium/Large.
-- Faster-gait push (negative): a **chunk-16** directed walker (longer committed
-  gait for sustained momentum) collapsed on Medium (0.00-0.10/20 vs chunk-8's
-  0.39) -- a 16-step open-loop chunk overshoots/wanders past a nearby subgoal.
-  With the earlier "fast" filter failure (min_progress 0.35 -> 0.125), the SSL
-  flow walker is at its **imitation-speed ceiling** (bounded by the wandering
-  D4RL demos). The high level is solved (flow-macro), so the residual Medium/Large
-  gap to HIQL (~0.77) needs a genuinely faster gait SOURCE (RL fine-tune or
-  faster demos), not another chunk/filter knob. chunk-8 directed is retained.
+- Faster-gait push (all negative — the SSL walker is at its imitation-speed
+  ceiling): (a) **chunk-16** directed walker collapsed on Medium (0.00-0.10/20 vs
+  chunk-8's 0.39) — a 16-step open-loop chunk overshoots a nearby subgoal;
+  (b) **hard fast-filter** (min_progress 0.35) → 0.125/80 — starves the turning
+  segments; (c) **speed-weighted sampling** (min_progress 0.1 + p~progress^2, so
+  turns are kept but fast segments are upweighted) → 0.34/80, within noise of the
+  uniform directed walker's 0.39. All three confirm the walker cannot exceed the
+  wandering D4RL demos' top speed by reweighting/filtering imitation data. The
+  high level is solved (flow-macro beats the graph), so the residual Medium/Large
+  gap to HIQL (~0.77) needs a genuinely faster gait SOURCE — a goal-conditioned
+  RL fine-tune of the walker (the one lever not yet pulled) — not another
+  imitation-data knob. chunk-8 uniform directed walker is retained as the SSL
+  ceiling.
 
 HWM neural high level (arXiv:2604.03208, "Hierarchical Planning with Latent
 World Models"), 2026-07-10:
