@@ -378,6 +378,15 @@ Why it works: the point agent has simple dynamics, so a future-conditioned
 inverse low level can reliably move between subgoals. The graph handles walls
 and sparse reward by planning through empirically reachable landmarks.
 
+**Dijkstra retired (2026-07-10):** migrated to the same flow-macro HWM + directed
+flow walker paradigm as AntMaze (no demo npz existed, so demos were collected via
+the scripted maze controller: `collect_episodes(scripted_fraction=0.95)`,
+~1.5k-3.4k eps/maze). Flow-macro HWM eval: **UMaze/Medium/Large 1.00/1.00/1.00**
+(seeds 30000/31000, 20 eps), matching the legacy graph+inverse. So no maze task
+in the repo uses the Dijkstra graph anymore -- all mazes run the neural
+flow-macro HWM high level. Checkpoints per maze:
+`point_{umaze,medium,large}_{flow_directed,hwm_s*,hwm_macroflow}.pt`.
+
 ### AntMaze UMaze
 
 Previous best in this repo: H-JEPA with BC low level around 0.93.
@@ -463,6 +472,14 @@ upgrades to the walker.
   ant walker's raw speed remains the limiter; the graph and emphasis are not the
   bottleneck. Next: a faster gait (better demos / a speed-shaped objective / a
   stronger AntMaze JEPA), then re-test on Medium/Large.
+- Faster-gait push (negative): a **chunk-16** directed walker (longer committed
+  gait for sustained momentum) collapsed on Medium (0.00-0.10/20 vs chunk-8's
+  0.39) -- a 16-step open-loop chunk overshoots/wanders past a nearby subgoal.
+  With the earlier "fast" filter failure (min_progress 0.35 -> 0.125), the SSL
+  flow walker is at its **imitation-speed ceiling** (bounded by the wandering
+  D4RL demos). The high level is solved (flow-macro), so the residual Medium/Large
+  gap to HIQL (~0.77) needs a genuinely faster gait SOURCE (RL fine-tune or
+  faster demos), not another chunk/filter knob. chunk-8 directed is retained.
 
 HWM neural high level (arXiv:2604.03208, "Hierarchical Planning with Latent
 World Models"), 2026-07-10:

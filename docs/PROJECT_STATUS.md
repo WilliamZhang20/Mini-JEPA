@@ -25,7 +25,7 @@ latent subgoals.
 | FetchPush | SSL replacement solved | flow prior + JEPA chunk selection, 1.00 |
 | FetchPickAndPlace | SSL replacement solved | inverse prior + JEPA chunk selection, 1.00 |
 | FetchSlide | Not SSL-replaced | JEPA-latent TQC/HER retained, 0.83 |
-| PointMaze UMaze/Medium/Large | SSL replacement solved on checked runs | 1.00/1.00/1.00; still on the legacy H-JEPA graph + inverse low level — flow-macro HWM migration pending demo collection (no demo npz on disk yet), mechanical given the AntMaze validation |
+| PointMaze UMaze/Medium/Large | SSL replacement solved (Dijkstra retired) | HWM flow-macro-prior high level + directed flow walker, 1.00/1.00/1.00 (matches the legacy graph+inverse; no Dijkstra) |
 | AntMaze UMaze | SSL replacement solved | HWM flow-macro-prior high level + directed flow walker (no Dijkstra), 0.867/60 |
 | AntMaze Medium | Improved (open) | HWM flow-macro-prior high level + directed flow walker, 0.39/80 (beats graph 0.26 and Gaussian-CEM 0.067); below historical HIQL ~0.77 |
 | AntMaze Large | Improved (open) | HWM flow-macro-prior high level + directed flow walker, 0.18/60 reproducible (was 0.00) |
@@ -86,8 +86,12 @@ latent subgoals.
   0.25 < horizon-1 0.39 — g's rollout compounds; the greedy 1-hop from feasible
   flow samples is best). The remaining gap to historical HIQL (Medium ~0.77) is
   the walker's raw gait speed: far-goal episodes time out within the 1000-step
-  budget. Next: a faster gait; migrate PointMaze off the graph (needs demo
-  collection). See EXPERIMENT_LEDGER for recipes and A/Bs.
+  budget. Next: a faster gait (chunk-16 and aggressive filters both failed — the
+  SSL walker is at its imitation-speed ceiling, so this needs an RL fine-tune or
+  faster demos, not another knob). **PointMaze is now also fully migrated off the
+  Dijkstra graph** to the same flow-macro HWM + directed flow walker paradigm
+  (U/M/L 1.00/1.00/1.00, matching the old graph+inverse), so no maze task uses
+  Dijkstra anymore. See EXPERIMENT_LEDGER for recipes and A/Bs.
 - **FrankaKitchen (SOLVED this session, reproducible):** the Relocate recipe
   ported directly to the sequential task closes it. Four **segment-pure
   per-subtask inverse specialists** (microwave/kettle/light switch/slide
