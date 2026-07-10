@@ -14,7 +14,7 @@ coherent gait toward the goal — multimodality preserved, gait phase consistent
   * rectified flow: x_t = (1-t) x0 + t x1, x0~N(0,I), x1=chunk; the velocity field
     v(x_t, t, c) regresses x1 - x0. Sampling = Euler-integrate the ODE noise->chunk.
 
-Executed receding-horizon by eval_hjepa_maze.py `--low-type flow`.
+Executed receding-horizon by eval_hjepa_hwm.py (flow-macro HWM) low level.
 """
 from __future__ import annotations
 

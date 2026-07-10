@@ -27,18 +27,16 @@ The repo is now organized around a simple boundary:
   manipulation, and striking tasks.
 - `jepa_robotics/algos/`: reusable SSL latent-control pieces:
   - `priors.py`: inverse action-chunk priors and diffusion/flow action-prior
-    networks, plus the shared sampler used by diffusion, flow, and residual
-    refiners.
-  - `contact.py`: contact-trace models and scoring for contact-aware SSL
-    planning: the Relocate conditional VAE over
-    `p(contact_trace | z_t, raw_t, action_chunk)` and the mode-aware
-    possession trust barrier used for candidate filtering.
-  - `futures.py`: future-target selection strategies, currently the
-    demo-locked future index used for receding-horizon demo tracking.
+    networks, plus the shared sampler.
+  - `futures.py`: future-target selection strategies — the demo-locked future
+    index (receding-horizon demo tracking) with per-subtask reachability
+    matching.
+  - `maze_low_level.py`: goal-conditioned maze low levels (flow walker, BC,
+    inverse) used under the HWM flow-macro high level.
   - `phase.py`: self-supervised progress phase features and phase-constrained
     future lookup.
-  - `hwm.py`: same-latent hierarchical world model components inspired by the
-    HWM direction.
+  - `hwm.py`: hierarchical world model components (macro-action encoder + latent
+    macro predictor) for the HWM high level (arXiv:2604.03208).
 
 ## Script Policy
 
@@ -53,17 +51,16 @@ When adding a new experiment:
 4. Preserve existing script filenames when possible because many run records and
    docs cite exact commands.
 
-Current coupled-prior scripts:
-
-- `scripts/train_flow_residual_refiner.py`: trains a residual diffusion/flow
-  model around a future-conditioned flow proposal.
-- `scripts/eval_flow_residual_refiner.py`: evaluates flow proposals, refined
-  proposals, and optionally the unrefined proposals in the same JEPA/state-scored
-  candidate set.
-
-This is why the current cleanup moves shared inverse/flow/phase/HWM pieces into
-`jepa_robotics/algos` while leaving the historical command names in `scripts/`.
-Executable file moves can happen later with compatibility wrappers.
+Retired (2026-07-10): the Dijkstra subgoal-graph maze controller
+(`eval_hjepa_maze.py`, `eval_hjepa2.py`, `record_hjepa_maze.py`) — replaced on
+every maze by the neural HWM flow-macro high level (`eval_hjepa_hwm.py` +
+`train_hwm_macro_flow.py`) over the directed flow walker; the Relocate
+contact-scoring experiments (`contact.py`, `train_relocate_contact_*.py`,
+`*flow_residual_refiner.py`) — all measured neutral/negative, not part of the
+canonical dual-specialist controller; and the failed Kitchen latent-dynamics /
+Dreamer / latent-HWM / MPC scripts. The canonical controllers are the
+subtask-specialist inverse (Kitchen), dual possession-specialist inverse
+(Relocate), and HWM flow-macro + flow walker (mazes).
 
 ## Runs Layout
 

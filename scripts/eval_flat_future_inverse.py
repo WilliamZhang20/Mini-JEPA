@@ -17,9 +17,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 from jepa_robotics.data import load_episodes_npz
 from jepa_robotics.envs import flatten_obs, make_env
 from jepa_robotics.evaluate import load_jepa_artifact
-from jepa_robotics.models import MLP
 from jepa_robotics.tasks import resolve_task
-from jepa_robotics.algos.contact import possession_trust_barrier
 from jepa_robotics.algos.futures import DemoLockedFutureIndex
 from jepa_robotics.algos.priors import InversePrior
 
@@ -73,11 +71,6 @@ class FlatInversePolicy:
         possession_switch_threshold: float = 0.06,
         possession_hysteresis: float = 0.0,
         possession_enter_delay: int = 0,
-        demo_candidates: int = 1,
-        contact_dyn=None,
-        contact_weight: float = 0.1,
-        target_weight: float = 0.1,
-        possession_barrier: float = 10.0,
         candidates: int,
         noise_std: float,
         exec_k: int,
@@ -102,11 +95,6 @@ class FlatInversePolicy:
         self.possession_enter_delay = possession_enter_delay
         self._in_possession_mode = False
         self._possession_replans = 0
-        self.demo_candidates = demo_candidates
-        self.contact_dyn = contact_dyn
-        self.contact_weight = contact_weight
-        self.target_weight = target_weight
-        self.possession_barrier = possession_barrier
         self.candidates = candidates
         self.noise_std = noise_std
         self.exec_k = exec_k
@@ -148,8 +136,6 @@ class FlatInversePolicy:
                     prior, ckpt = self.possession_prior, self.possession_ckpt
             else:
                 self._possession_replans = 0
-        if self.demo_candidates > 1 and self.contact_dyn is not None and hasattr(self.future_index, "query_topk"):
-            return self._plan_demo_candidates(raw, env, prior, ckpt)
         target_state = self.future_index.query(raw, self.normalizer)
         s = torch.from_numpy(self.normalizer.encode(raw)).unsqueeze(0).to(self.device)
         tgt = torch.from_numpy(self.normalizer.encode(target_state)).unsqueeze(0).to(self.device)
@@ -191,50 +177,6 @@ class FlatInversePolicy:
         best = int(torch.argmin(scores).detach().cpu())
         return actions[best].detach().cpu().numpy().astype(np.float32)
 
-    @torch.no_grad()
-    def _plan_demo_candidates(self, raw, env, prior, ckpt):
-        """Deterministic chunk per candidate demo future, ranked by the
-        action-conditioned contact-dynamics head. Diversity comes from demo
-        coverage instead of sampling noise, so the expert manifold is never
-        blurred; the contact model only picks among demonstrated closures."""
-        K = self.demo_candidates
-        futures = self.future_index.query_topk(raw, self.normalizer, K)
-        s = torch.from_numpy(self.normalizer.encode(raw)).unsqueeze(0).to(self.device)
-        z = self.wm.encode(s)
-        tgts = torch.from_numpy(np.stack([self.normalizer.encode(f) for f in futures]).astype(np.float32)).to(self.device)
-        z_goal = self.wm.encode_target(tgts)
-        n = tgts.shape[0]
-        horizons = list(ckpt.get("future_horizons", [int(ckpt["H"])]))
-        target_h = int(self.target_horizon or max(horizons))
-        h_token = torch.full((n, 1), float(target_h) / float(max(horizons)), dtype=z.dtype, device=self.device)
-        parts = [z.repeat(n, 1), z_goal, h_token]
-        if bool(ckpt.get("concat_raw", False)):
-            parts.extend([s.repeat(n, 1), tgts])
-        _append_emphasis(parts, s.repeat(n, 1), ckpt)
-        chunks = prior(torch.cat(parts, dim=-1)).view(n, int(ckpt["H"]), int(ckpt["action_dim"])) * self.action_scale
-        low = torch.as_tensor(env.action_space.low, dtype=torch.float32, device=self.device)
-        high = torch.as_tensor(env.action_space.high, dtype=torch.float32, device=self.device)
-        chunks = chunks.clamp(low, high)
-        dyn_cond = torch.cat([z.repeat(n, 1), s.repeat(n, 1), chunks.flatten(1)], dim=-1)
-        dyn = torch.clamp(self.contact_dyn(dyn_cond), min=0.0).view(n, int(ckpt["H"]), 2)
-        contact, target = dyn[:, :, 0], dyn[:, :, 1]
-        scores = self.contact_weight * (contact[:, -1] + 0.25 * contact.mean(dim=1))
-        scores = scores + self.target_weight * (target[:, -1] + 0.25 * target.mean(dim=1))
-        if self.possession_barrier > 0:
-            scores = scores + possession_trust_barrier(
-                contact,
-                target,
-                palm_ball=float(np.linalg.norm(raw[30:33])),
-                ball_target=float(np.linalg.norm(raw[36:39])),
-                barrier=self.possession_barrier,
-            )
-        if self.action_delta_weight > 0:
-            prev = torch.as_tensor(self.prev_action, dtype=torch.float32, device=self.device).view(1, 1, -1)
-            delta = torch.cat([chunks[:, :1] - prev, chunks[:, 1:] - chunks[:, :-1]], dim=1)
-            scores = scores + self.action_delta_weight * delta.square().mean(dim=(1, 2))
-        best = int(torch.argmin(scores).detach().cpu())
-        return chunks[best].detach().cpu().numpy().astype(np.float32)
-
     def act(self, obs, env):
         if not self.cached:
             plan = self._plan(obs, env)
@@ -257,13 +199,6 @@ def main() -> None:
                    help="Extra palm-ball slack before switching back OUT of the possession specialist, preventing specialist dithering at the grasp boundary.")
     p.add_argument("--possession-enter-delay", type=int, default=0,
                    help="Keep the reach specialist for this many replans after first entering possession before handing off to the transport specialist, so a marginal fresh grasp is secured before a transport action is issued.")
-    p.add_argument("--demo-candidates", type=int, default=1,
-                   help="demo_locked: number of candidate demo futures (distinct episodes) per replan; deterministic chunks per candidate are ranked by the contact-dynamics head.")
-    p.add_argument("--contact-dynamics-path", type=Path, default=None,
-                   help="Action-conditioned contact-dynamics head used to rank multi-demo candidate chunks.")
-    p.add_argument("--contact-weight", type=float, default=0.1)
-    p.add_argument("--target-weight", type=float, default=0.1)
-    p.add_argument("--possession-barrier", type=float, default=10.0)
     p.add_argument("--log-episodes", action="store_true",
                    help="Print a per-episode diagnostic row: grasp achieved, drops after possession, final ball-target distance.")
     p.add_argument("--episodes", type=int, default=20)
@@ -317,15 +252,6 @@ def main() -> None:
         ).to(dev)
         possession_prior.load_state_dict(possession_ckpt["state_dict"])
         possession_prior.eval()
-    contact_dyn = None
-    if args.contact_dynamics_path is not None:
-        cd_ckpt = torch.load(args.contact_dynamics_path, map_location=dev, weights_only=False)
-        sizes = [int(cd_ckpt["cond_dim"])] + [int(cd_ckpt["hidden"])] * max(1, int(cd_ckpt["n_blocks"])) + [int(cd_ckpt["target_dim"])]
-        contact_dyn = MLP(sizes, layer_norm=True).to(dev)
-        contact_dyn.load_state_dict(cd_ckpt["state_dict"])
-        contact_dyn.eval()
-        for param in contact_dyn.parameters():
-            param.requires_grad_(False)
     if args.future_index == "demo_locked":
         if args.future_episodes_npz is None:
             raise ValueError("--future-index demo_locked requires --future-episodes-npz")
@@ -355,11 +281,6 @@ def main() -> None:
         candidates=args.candidates, noise_std=args.noise_std,
         possession_hysteresis=args.possession_hysteresis,
         possession_enter_delay=args.possession_enter_delay,
-        demo_candidates=args.demo_candidates,
-        contact_dyn=contact_dyn,
-        contact_weight=args.contact_weight,
-        target_weight=args.target_weight,
-        possession_barrier=args.possession_barrier,
         exec_k=args.exec_k, target_horizon=args.target_horizon,
         latent_weight=args.latent_weight, state_weight=args.state_weight,
         action_delta_weight=args.action_delta_weight, action_scale=args.action_scale,
@@ -436,11 +357,6 @@ def main() -> None:
         "inverse_possession_path": str(args.inverse_possession_path) if args.inverse_possession_path is not None else None,
         "possession_switch_threshold": float(args.possession_switch_threshold),
         "possession_hysteresis": float(args.possession_hysteresis),
-        "demo_candidates": int(args.demo_candidates),
-        "contact_dynamics_path": str(args.contact_dynamics_path) if args.contact_dynamics_path is not None else None,
-        "contact_weight": float(args.contact_weight),
-        "target_weight": float(args.target_weight),
-        "possession_barrier": float(args.possession_barrier),
         "torch_seed": args.torch_seed,
     }
     print(json.dumps(row, default=str), flush=True)

@@ -31,7 +31,7 @@ from jepa_robotics.data import load_episodes_npz
 from jepa_robotics.envs import flatten_obs, make_env, obs_spec_from_env
 from jepa_robotics.models import normalized_mse
 from jepa_robotics.tasks import resolve_task
-from scripts.eval_hjepa_maze import LowLevelBC, LowLevelFlow, build_subgoal_graph, dijkstra_path, farthest_point_sample
+from jepa_robotics.algos.maze_low_level import LowLevelBC, LowLevelFlow
 from scripts.train_hjepa_hwm import HighEncoder, MacroEncoder, MacroPredictor, SubgoalDecoder, build_macro_data
 from jepa_robotics.algos.priors import EpsNet, make_ddpm, sample_action_chunks
 
@@ -86,31 +86,6 @@ def load_hwm(path, dev):
 
 
 @torch.no_grad()
-def cem_macro(g, dec, z_high_cur, goal_pos, c, dev, K=4, iters=6, samples=512, elite=0.1, seed=0):
-    """CEM over a sequence of K macro-actions, rolled through g; score = decoded
-    terminal position vs goal. Returns the first macro-action (continuous)."""
-    rng = np.random.default_rng(seed)
-    md = c["macro_dim"]
-    m_mean = np.asarray(c["m_mean"], np.float32); m_std = np.asarray(c["m_std"], np.float32)
-    mean = np.tile(m_mean, (K, 1)); std = np.tile(np.maximum(m_std, 0.1) * 2.0, (K, 1))
-    g_t = torch.as_tensor(goal_pos, dtype=torch.float32, device=dev)
-    best_first = mean[0].copy(); best = np.inf
-    for _ in range(iters):
-        ms = rng.normal(mean, std, size=(samples, K, md)).astype(np.float32)
-        mt = torch.from_numpy(ms).to(dev)
-        z = z_high_cur.expand(samples, -1)
-        for k in range(K):
-            z = g(z, mt[:, k])
-        cost = (dec(z) - g_t).norm(dim=-1).cpu().numpy()
-        order = np.argsort(cost)
-        if cost[order[0]] < best:
-            best = float(cost[order[0]]); best_first = ms[order[0], 0].copy()
-        el = ms[order[: max(1, int(samples * elite))]]
-        mean = el.mean(0); std = np.maximum(el.std(0), 0.05)
-    return best_first
-
-
-@torch.no_grad()
 def true_compounding_error(psi, macro, g, episodes, spec, normalizer, wm, dev, stride, depths=(1, 2, 3, 4)):
     """True multi-step error: chain g over CONSECUTIVE macro-windows of a held-out
     trajectory (m_t, m_{t+N}, ...) from psi(z_t), vs the ground-truth psi(z_{t+kN})."""
@@ -134,14 +109,15 @@ def true_compounding_error(psi, macro, g, episodes, spec, normalizer, wm, dev, s
     return out
 
 
-def run_hwm_cem(env_id, max_steps, low, psi, g, dec, c, episodes, seed, dev, reach_radius, low_timeout, K=4,
-                goal_reach_radius=0.5, macro_flow=None, video_out=None, width=640, height=480, fps=30):
-    """HWM-CEM high level on top of the (unchanged) low level. The high level
-    replans a macro-action / subgoal when the low level REACHES the current
-    decoded subgoal (within reach_radius) or stalls on it for low_timeout steps
-    -- reach-based, not fixed-stride, so a slow low level gets time to arrive
-    before the next hop is issued. Once the CEM terminal cost is small the final
-    subgoal is snapped to the true goal so the low level finishes onto it."""
+def run_hwm_flow(env_id, max_steps, low, psi, g, dec, macro_flow, episodes, seed, dev, reach_radius, low_timeout,
+                 video_out=None, width=640, height=480, fps=30):
+    """HWM flow-macro high level on top of the (unchanged) low level. Replans a
+    subgoal (sampled feasible macro -> g -> decoded xy) when the low level REACHES
+    the current subgoal (within reach_radius) or stalls on it for low_timeout
+    steps -- reach-based, not fixed-stride, so a slow low level gets time to
+    arrive before the next hop is issued. Once the decoded subgoal is essentially
+    the goal, aim straight at the goal so the low level finishes onto it."""
+    fnet, fddpm, fcfg = macro_flow
     succ = []
     video_saved = False
     for ep in range(episodes):
@@ -162,17 +138,10 @@ def run_hwm_cem(env_id, max_steps, low, psi, g, dec, c, episodes, seed, dev, rea
             if need_replan or np.linalg.norm(ag - sg) < reach_radius or since_replan >= low_timeout:
                 z = low.model.encode(torch.from_numpy(low.norm.encode(flatten_obs(obs))).unsqueeze(0).to(dev))
                 z_high = psi(z)
-                if macro_flow is not None:
-                    fnet, fddpm, fcfg = macro_flow
-                    sg = flow_macro_subgoal(fnet, fddpm, g, dec, z_high, goal, dev,
-                                            n_samples=fcfg.get("n_samples", 16),
-                                            flow_steps=int(fddpm["T"]),
-                                            horizon=fcfg.get("horizon", 1))
-                else:
-                    m1 = cem_macro(g, dec, z_high, goal, c, dev, K=K, seed=seed + ep + t)
-                    with torch.no_grad():
-                        z_next = g(z_high, torch.from_numpy(m1).unsqueeze(0).to(dev))
-                        sg = dec(z_next)[0].cpu().numpy()
+                sg = flow_macro_subgoal(fnet, fddpm, g, dec, z_high, goal, dev,
+                                        n_samples=fcfg.get("n_samples", 16),
+                                        flow_steps=int(fddpm["T"]),
+                                        horizon=fcfg.get("horizon", 1))
                 # if the decoded next subgoal is already essentially the goal, aim at the goal
                 if np.linalg.norm(sg - goal) < reach_radius:
                     sg = goal
@@ -198,30 +167,29 @@ def run_hwm_cem(env_id, max_steps, low, psi, g, dec, c, episodes, seed, dev, rea
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--task", required=True)
-    p.add_argument("--hwm", type=Path, required=True)
-    p.add_argument("--bc-policy", type=Path, required=True,
-                   help="Low-level policy: BC .pt (low-type bc) or flow-walker .pt (low-type flow).")
-    p.add_argument("--low-type", default="bc", choices=["bc", "flow"],
-                   help="Low level to run under the HWM high level: 'bc' goal-conditioned BC, or 'flow' the directed flow-matching walker.")
-    p.add_argument("--jepa-model", type=Path, required=True)
-    p.add_argument("--graph-npz", type=Path, required=True)
-    p.add_argument("--episodes", type=int, default=50)
-    p.add_argument("--seed", type=int, default=20000)
-    p.add_argument("--reach-radius", type=float, default=2.5)
-    p.add_argument("--low-timeout", type=int, default=60)
-    p.add_argument("--k-list", default="1,2,4", help="planning horizons K (macro-steps) to sweep")
-    p.add_argument("--macro-flow", type=Path, default=None,
-                   help="Flow prior over macro-actions (train_hwm_macro_flow.py). When set, the high level samples feasible macros from it instead of Gaussian CEM, avoiding wall-crossing subgoals.")
+    p.add_argument("--hwm", type=Path, required=True, help="HWM checkpoint (psi/macro/g/dec) from train_hjepa_hwm.py")
+    p.add_argument("--macro-flow", type=Path, required=True,
+                   help="Flow prior over macro-actions (train_hwm_macro_flow.py). The high level samples feasible on-manifold macros from it, then g -> decoded subgoal.")
     p.add_argument("--macro-flow-samples", type=int, default=16)
     p.add_argument("--macro-flow-horizon", type=int, default=1,
-                   help="Number of feasible macro-hops to look ahead through g when scoring flow-sampled macros (>=2 plans around walls).")
-    p.add_argument("--skip-diagnostics", action="store_true", help="skip the generalization/compounding-error experiments; just run HWM-CEM control")
-    p.add_argument("--video-out", type=Path, default=None, help="Save an mp4 of the first successful HWM episode (flow-macro mode).")
+                   help="Feasible macro-hops to look ahead through g when scoring flow-sampled macros (1 is best; >=2 compounds g error).")
+    p.add_argument("--bc-policy", type=Path, required=True,
+                   help="Low-level policy: flow-walker .pt (low-type flow) or BC .pt (low-type bc).")
+    p.add_argument("--low-type", default="flow", choices=["flow", "bc"],
+                   help="Low level under the HWM high level: 'flow' the directed flow-matching walker (canonical), or 'bc'.")
+    p.add_argument("--jepa-model", type=Path, required=True)
+    p.add_argument("--episodes-npz", type=Path, default=None,
+                   help="Episodes for the (optional) macro-model diagnostics; not needed for control.")
+    p.add_argument("--episodes", type=int, default=50)
+    p.add_argument("--seed", type=int, default=20000)
+    p.add_argument("--reach-radius", type=float, default=1.0)
+    p.add_argument("--low-timeout", type=int, default=90)
+    p.add_argument("--diagnostics", action="store_true",
+                   help="Also report the HWM macro-model held-out generalization + compounding-error diagnostics (needs --episodes-npz).")
+    p.add_argument("--video-out", type=Path, default=None, help="Save an mp4 of the first successful episode.")
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--landmarks", type=int, default=150)
-    p.add_argument("--k-reach", type=int, default=40)
     p.add_argument("--holdout-frac", type=float, default=0.1)
     p.add_argument("--device", default="cpu")
     args = p.parse_args()
@@ -229,53 +197,37 @@ def main() -> None:
     task = resolve_task(args.task, None)
     dev = torch.device(args.device)
     psi, macro, g, dec, c = load_hwm(args.hwm, dev)
-    genv = make_env(task.env_id, seed=args.seed + 7, max_episode_steps=task.max_episode_steps)
-    spec = obs_spec_from_env(genv); genv.close()
-    eps = load_episodes_npz(args.graph_npz)
 
     env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
     if args.low_type == "flow":
-        low = LowLevelFlow(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high,
-                           device=args.device)
+        low = LowLevelFlow(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high, device=args.device)
     else:
         low = LowLevelBC(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high, device=args.device)
     env.close()
 
-    if not args.skip_diagnostics:
-        # ---- EXPERIMENT 1 + 3: held-out N-step generalization + compounding error ----
-        n_hold = max(1, int(len(eps) * args.holdout_frac))
-        hold = eps[:n_hold]
+    if args.diagnostics and args.episodes_npz is not None:
+        # HWM macro-model quality: held-out next-macro generalization + compounding error.
+        genv = make_env(task.env_id, seed=args.seed + 7, max_episode_steps=task.max_episode_steps)
+        spec = obs_spec_from_env(genv); genv.close()
+        eps = load_episodes_npz(args.episodes_npz)
+        hold = eps[: max(1, int(len(eps) * args.holdout_frac))]
         Zh, Z2h, Chh, Posh = build_macro_data(hold, spec, low.norm, low.model, dev, c["stride"])
         with torch.no_grad():
             gen_err = float(normalized_mse(g(psi(Zh), macro(Chh)), psi(Z2h)))
         comp = true_compounding_error(psi, macro, g, hold, spec, low.norm, low.model, dev, c["stride"])
-        # table coverage: fraction of landmark pairs the empirical graph has an edge for
-        landmarks, adj = build_subgoal_graph(eps, spec, args.landmarks, args.k_reach, seed=args.seed)
-        coverage = float(np.isfinite(adj).sum()) / (len(landmarks) * (len(landmarks) - 1))
-        print(json.dumps({"event": "experiment_generalization",
+        print(json.dumps({"event": "hwm_macro_diagnostics",
                           "g_holdout_pred_err": round(gen_err, 4),
-                          "empirical_table_pair_coverage": round(coverage, 4),
-                          "g_pair_coverage": 1.0,
                           "true_compounding_rmse_by_depth": comp}), flush=True)
 
-    # ---- EXPERIMENT 2: HWM high level (CEM or flow-macro) vs Dijkstra ----
-    if args.macro_flow is not None:
-        fnet, fddpm, fcfg = load_macro_flow(args.macro_flow, dev)
-        fcfg["n_samples"] = args.macro_flow_samples
-        fcfg["horizon"] = args.macro_flow_horizon
-        hwm = run_hwm_cem(task.env_id, task.max_episode_steps, low, psi, g, dec, c, args.episodes, args.seed,
-                          dev, args.reach_radius, args.low_timeout, macro_flow=(fnet, fddpm, fcfg),
-                          video_out=args.video_out, width=args.width, height=args.height, fps=args.fps)
-        print(json.dumps({"task": task.name,
-                          "policy": f"H-JEPA-HWM (FLOW macro-prior, n={args.macro_flow_samples}, low={args.low_type})",
-                          "episodes": args.episodes, "success_rate": round(hwm, 4)}), flush=True)
-        return
-    for K in [int(x) for x in args.k_list.split(",")]:
-        hwm = run_hwm_cem(task.env_id, task.max_episode_steps, low, psi, g, dec, c, args.episodes, args.seed,
-                          dev, args.reach_radius, args.low_timeout, K=K)
-        print(json.dumps({"task": task.name,
-                          "policy": f"H-JEPA-HWM (CEM macro-actions, K={K}, low={args.low_type})",
-                          "episodes": args.episodes, "success_rate": round(hwm, 4)}), flush=True)
+    fnet, fddpm, fcfg = load_macro_flow(args.macro_flow, dev)
+    fcfg["n_samples"] = args.macro_flow_samples
+    fcfg["horizon"] = args.macro_flow_horizon
+    hwm = run_hwm_flow(task.env_id, task.max_episode_steps, low, psi, g, dec, (fnet, fddpm, fcfg),
+                       args.episodes, args.seed, dev, args.reach_radius, args.low_timeout,
+                       video_out=args.video_out, width=args.width, height=args.height, fps=args.fps)
+    print(json.dumps({"task": task.name,
+                      "policy": f"H-JEPA-HWM (flow macro-prior, n={args.macro_flow_samples}, low={args.low_type})",
+                      "episodes": args.episodes, "success_rate": round(hwm, 4)}), flush=True)
 
 
 if __name__ == "__main__":
