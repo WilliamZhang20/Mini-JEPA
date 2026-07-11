@@ -116,6 +116,8 @@ def main() -> None:
     p.add_argument("--disagree-weight", type=float, default=0.0)
     p.add_argument("--max-episode-steps", type=int, default=100)
     p.add_argument("--torch-seed", type=int, default=0)
+    p.add_argument("--log-path", type=Path, default=None,
+                   help="Optional JSONL path; writes one completion row per episode and a final summary.")
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     args = p.parse_args()
 
@@ -129,19 +131,34 @@ def main() -> None:
                     args.elite_frac, args.init_std, args.exec_k, args.disagree_weight)
 
     successes = []
+    log_file = None
+    if args.log_path is not None:
+        args.log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = args.log_path.open("w")
     for ep in range(args.episodes):
         obs, _ = env.reset(seed=args.seed + ep)
         mpc.reset()
         term = trunc = False; info = {}
         while not (term or trunc):
             obs, _, term, trunc, info = env.step(mpc.act(obs, env))
-        successes.append(float(info.get("is_success", 0.0)))
+        success = float(info.get("is_success", 0.0))
+        successes.append(success)
+        episode_row = {"event": "handmanipulate_mpc_episode", "task": task.name,
+                       "episode": ep, "success": success,
+                       "running_success_rate": float(np.mean(successes))}
+        print(json.dumps(episode_row), flush=True)
+        if log_file is not None:
+            log_file.write(json.dumps(episode_row) + "\n")
+            log_file.flush()
     env.close()
     row = {"event": "handmanipulate_mpc_eval", "task": task.name, "model_path": str(args.model_path),
            "episodes": args.episodes, "success_rate": float(np.mean(successes)),
            "horizon": args.horizon, "candidates": args.candidates, "iters": args.iters,
            "exec_k": args.exec_k, "disagree_weight": args.disagree_weight, "torch_seed": args.torch_seed}
     print(json.dumps(row, default=str), flush=True)
+    if log_file is not None:
+        log_file.write(json.dumps(row, default=str) + "\n")
+        log_file.close()
 
 
 if __name__ == "__main__":
