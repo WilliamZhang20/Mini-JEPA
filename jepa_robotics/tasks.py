@@ -100,6 +100,37 @@ TASKS = {
         max_episode_steps=200,
         horizons="1,2,4,8,16",
     ),
+    # Shadow Dexterous Hand in-hand reorientation (HandManipulate suite): 20-D
+    # actuator action, obs=61 (24-DoF hand qpos/qvel + object pose/vel),
+    # achieved/desired goal = object pose (pos+quat, 7-D). Sparse reward,
+    # contact-rich, multimodal — the target regime for DexterousJEPA. No scripted
+    # expert (controller="none"); data is exploration collected with the trained
+    # world model / random actions, control is goal-conditioned latent planning
+    # toward the desired object pose.
+    "handmanipulate_block": TaskConfig(
+        name="handmanipulate_block",
+        env_id="HandManipulateBlock-v1",
+        slug="handmanipulate_block",
+        controller="none",
+        max_episode_steps=100,
+        horizons="1,2,4,8,16",
+    ),
+    "handmanipulate_egg": TaskConfig(
+        name="handmanipulate_egg",
+        env_id="HandManipulateEgg-v1",
+        slug="handmanipulate_egg",
+        controller="none",
+        max_episode_steps=100,
+        horizons="1,2,4,8,16",
+    ),
+    "handmanipulate_pen": TaskConfig(
+        name="handmanipulate_pen",
+        env_id="HandManipulatePen-v1",
+        slug="handmanipulate_pen",
+        controller="none",
+        max_episode_steps=100,
+        horizons="1,2,4,8,16",
+    ),
     # Tier 2 — PointMaze navigation: 2-D force action, obs = [x, y, vx, vy],
     # achieved/desired goal = (x, y). Sparse reward, long horizon, walls break
     # the straight-line heuristic, so the expert is a BFS-waypoint controller
