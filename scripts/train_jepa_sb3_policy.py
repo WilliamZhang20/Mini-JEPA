@@ -15,7 +15,6 @@ from pathlib import Path
 
 import imageio.v2 as imageio
 import numpy as np
-import gymnasium as gym
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -24,34 +23,7 @@ from jepa_robotics.sb3_jepa import JEPALatentExtractor, JEPALatentRawExtractor
 from jepa_robotics.tasks import resolve_task
 
 
-class DenseHandGoalReward(gym.Wrapper):
-    """Expose the HandManipulate physical pose error as a dense HER reward.
-
-    The registered benchmark uses a sparse -1/0 reward.  For a 20-DoF hand,
-    that gives online HER almost no signal before the first accidental full
-    reorientation.  This wrapper preserves the environment's success predicate
-    in ``info`` for evaluation, but trains on its documented dense surrogate:
-    ``-(10 * position_error + quaternion_angle_error)``.
-    """
-
-    def compute_reward(self, achieved_goal, desired_goal, info):
-        achieved = np.asarray(achieved_goal, dtype=np.float32)
-        desired = np.asarray(desired_goal, dtype=np.float32)
-        d_pos = np.linalg.norm(achieved[..., :3] - desired[..., :3], axis=-1)
-        qa, qb = achieved[..., 3:], desired[..., 3:]
-        qa = qa / np.maximum(np.linalg.norm(qa, axis=-1, keepdims=True), 1e-6)
-        qb = qb / np.maximum(np.linalg.norm(qb, axis=-1, keepdims=True), 1e-6)
-        d_rot = 2.0 * np.arccos(np.clip(np.sum(qa * qb, axis=-1), -1.0, 1.0))
-        return -(10.0 * d_pos + d_rot).astype(np.float32)
-
-    def step(self, action):
-        obs, _reward, terminated, truncated, info = self.env.step(action)
-        reward = float(self.compute_reward(obs["achieved_goal"], obs["desired_goal"], info))
-        return obs, reward, terminated, truncated, info
-
-
-def build_env(env_id: str, max_steps: int, seed: int, render_mode=None, width=None, height=None,
-              dense_hand_reward: bool = False):
+def build_env(env_id: str, max_steps: int, seed: int, render_mode=None, width=None, height=None):
     env = make_env(
         env_id,
         seed=seed,
@@ -60,7 +32,7 @@ def build_env(env_id: str, max_steps: int, seed: int, render_mode=None, width=No
         width=width,
         height=height,
     )
-    return DenseHandGoalReward(env) if dense_hand_reward else env
+    return env
 
 
 def seed_demo_episodes(model, env_id, max_steps, controller, action_dim, n_episodes, gain, seed):
@@ -198,8 +170,6 @@ def main() -> None:
                    help="Give goal-conditioned RL both normalized raw state and the frozen JEPA latent."
                         " Recommended for contact-rich tasks where a random-data encoder may omit"
                         " rare fingertip/object geometry.")
-    p.add_argument("--dense-hand-reward", action="store_true",
-                   help="Train HandManipulate/HER with dense physical pose error while preserving sparse success metrics.")
     p.add_argument("--collapse-critic-loss", type=float, default=100.0)
     p.add_argument("--collapse-actor-loss", type=float, default=1000.0)
     p.add_argument("--collapse-ent-coef", type=float, default=0.5)
@@ -240,7 +210,7 @@ def main() -> None:
     save_model.parent.mkdir(parents=True, exist_ok=True)
     video_out.parent.mkdir(parents=True, exist_ok=True)
 
-    env = build_env(env_id, max_steps, args.seed, dense_hand_reward=args.dense_hand_reward)
+    env = build_env(env_id, max_steps, args.seed)
     net_arch = [int(part) for part in args.net_arch.split(",") if part.strip()]
     if args.resume and save_model.exists():
         print(f'{{"event": "resume", "model": "{save_model}"}}', flush=True)
@@ -368,7 +338,7 @@ def main() -> None:
             save_replay_buffer=True,
         )
         callbacks_list.append(replay_ckpt_cb)
-    eval_env = build_env(env_id, max_steps, args.seed + 10_000, dense_hand_reward=args.dense_hand_reward)
+    eval_env = build_env(env_id, max_steps, args.seed + 10_000)
     eval_cb = EvalCallback(
         eval_env,
         best_model_save_path=str(save_model.parent / f"{save_model.stem}_best"),
@@ -423,7 +393,7 @@ def main() -> None:
         args.seed,
         render_mode="rgb_array",
         width=args.width,
-        height=args.height, dense_hand_reward=args.dense_hand_reward,
+        height=args.height,
     )
     frames, successes = [], []
     for ep in range(args.eval_episodes):
