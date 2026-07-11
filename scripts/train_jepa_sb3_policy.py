@@ -129,8 +129,6 @@ def main() -> None:
     p.add_argument("--height", type=int, default=720)
     p.add_argument("--save-model", type=Path, default=None)
     p.add_argument("--video-out", type=Path, default=None)
-    p.add_argument("--no-record", action="store_true",
-                   help="Skip end-of-run video recording (useful for unattended training or headless probes).")
     p.add_argument("--device", default="cuda")
     p.add_argument("--checkpoint-freq", type=int, default=50_000)
     p.add_argument("--eval-freq", type=int, default=25_000)
@@ -382,10 +380,6 @@ def main() -> None:
         print(f'{{"event": "saved_replay_buffer", "path": "{replay_out}"}}', flush=True)
     eval_env.close()
     print(f'{{"event": "trained", "minutes": {round((time.time() - t0) / 60, 1)}, "model": "{save_model}"}}', flush=True)
-
-    if args.no_record:
-        env.close()
-        return
 
     rec_env = build_env(
         env_id,
