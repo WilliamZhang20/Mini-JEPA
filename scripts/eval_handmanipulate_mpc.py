@@ -131,7 +131,6 @@ def main() -> None:
                     args.elite_frac, args.init_std, args.exec_k, args.disagree_weight)
 
     successes = []
-    final_pos_errors, final_rot_errors = [], []
     log_file = None
     if args.log_path is not None:
         args.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,14 +143,9 @@ def main() -> None:
             obs, _, term, trunc, info = env.step(mpc.act(obs, env))
         success = float(info.get("is_success", 0.0))
         successes.append(success)
-        achieved = np.asarray(obs["achieved_goal"], dtype=np.float32)
-        desired = np.asarray(obs["desired_goal"], dtype=np.float32)
-        d_pos, d_rot = env.unwrapped._goal_distance(achieved, desired)
-        final_pos_errors.append(float(d_pos)); final_rot_errors.append(float(d_rot))
         episode_row = {"event": "handmanipulate_mpc_episode", "task": task.name,
                        "episode": ep, "success": success,
-                       "running_success_rate": float(np.mean(successes)),
-                       "final_pos_error": float(d_pos), "final_rot_error": float(d_rot)}
+                       "running_success_rate": float(np.mean(successes))}
         print(json.dumps(episode_row), flush=True)
         if log_file is not None:
             log_file.write(json.dumps(episode_row) + "\n")
@@ -159,8 +153,6 @@ def main() -> None:
     env.close()
     row = {"event": "handmanipulate_mpc_eval", "task": task.name, "model_path": str(args.model_path),
            "episodes": args.episodes, "success_rate": float(np.mean(successes)),
-           "mean_final_pos_error": float(np.mean(final_pos_errors)),
-           "mean_final_rot_error": float(np.mean(final_rot_errors)),
            "horizon": args.horizon, "candidates": args.candidates, "iters": args.iters,
            "exec_k": args.exec_k, "disagree_weight": args.disagree_weight, "torch_seed": args.torch_seed}
     print(json.dumps(row, default=str), flush=True)
