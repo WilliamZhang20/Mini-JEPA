@@ -67,6 +67,12 @@ def main() -> None:
     p.add_argument("--lambda-cov", type=float, default=0.5)
     p.add_argument("--lambda-state", type=float, default=1.0)
     p.add_argument("--lambda-contact", type=float, default=1.0)
+    p.add_argument("--lambda-pred-state", type=float, default=1.0,
+                   help="Decode predicted rollout latents back to their future state."
+                        " Without this, MPC scores a state probe trained only on encoder latents.")
+    p.add_argument("--lambda-pred-achieved", type=float, default=4.0,
+                   help="Extra rollout-decoder weight on achieved object pose; the control-relevant"
+                        " part of a HandManipulate state.")
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
 
@@ -121,6 +127,17 @@ def main() -> None:
         loss = normalized_mse(pred, target)
         loss = loss + args.lambda_var * variance_regularizer(z) + args.lambda_cov * covariance_regularizer(z)
         loss = loss + args.lambda_state * torch.nn.functional.mse_loss(wm.state_probe(z), s_t)
+        # Planning decodes *predicted* latents into object poses.  Aligning
+        # pred with an EMA target alone does not ensure that the state probe is
+        # calibrated on those rollout latents, particularly after multi-contact
+        # transitions.  Supervise the decoder directly on the h-step future and
+        # emphasize achieved_goal (object pose) over static desired_goal fields.
+        pred_state = wm.state_probe(pred)
+        loss = loss + args.lambda_pred_state * torch.nn.functional.mse_loss(pred_state, s_fut)
+        ag_lo, ag_hi = spec.obs_dim, spec.obs_dim + spec.goal_dim
+        loss = loss + args.lambda_pred_achieved * torch.nn.functional.mse_loss(
+            pred_state[:, ag_lo:ag_hi], s_fut[:, ag_lo:ag_hi]
+        )
         if contact is not None:
             lo, hi = contact
             loss = loss + args.lambda_contact * torch.nn.functional.mse_loss(wm.contact_consistency(z), s_t[:, lo:hi])
@@ -130,7 +147,10 @@ def main() -> None:
         opt.step()
         wm.update_target(args.ema)
         if step == 1 or step % 2000 == 0:
-            print(json.dumps({"event": "dex_jepa_train", "step": step, "h": h, "loss": round(float(loss.detach()), 4)}), flush=True)
+            print(json.dumps({"event": "dex_jepa_train", "step": step, "h": h,
+                              "loss": round(float(loss.detach()), 4),
+                              "pred_state": round(float(torch.nn.functional.mse_loss(pred_state, s_fut).detach()), 4),
+                              "pred_achieved": round(float(torch.nn.functional.mse_loss(pred_state[:, ag_lo:ag_hi], s_fut[:, ag_lo:ag_hi]).detach()), 4)}), flush=True)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
@@ -143,6 +163,8 @@ def main() -> None:
             "d_model": args.d_model, "enc_depth": args.enc_depth, "dyn_depth": args.dyn_depth,
             "heads": args.heads, "max_horizon": max_h, "ensemble_heads": args.ensemble_heads,
             "contact_dims": list(contact) if contact else None,
+            "lambda_pred_state": args.lambda_pred_state,
+            "lambda_pred_achieved": args.lambda_pred_achieved,
         },
     }, args.out)
     print(json.dumps({"event": "dex_jepa_saved", "path": str(args.out), "params_M": round(nparams, 2)}), flush=True)
