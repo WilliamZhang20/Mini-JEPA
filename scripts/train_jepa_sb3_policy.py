@@ -19,7 +19,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from jepa_robotics.envs import make_env
-from jepa_robotics.sb3_jepa import JEPALatentExtractor
+from jepa_robotics.sb3_jepa import JEPALatentExtractor, JEPALatentRawExtractor
 from jepa_robotics.tasks import resolve_task
 
 
@@ -164,6 +164,10 @@ def main() -> None:
     p.add_argument("--gradient-steps", type=int, default=1)
     p.add_argument("--fixed-ent-coef", type=float, default=None)
     p.add_argument("--latent-layer-norm", action="store_true")
+    p.add_argument("--concat-raw", action="store_true",
+                   help="Give goal-conditioned RL both normalized raw state and the frozen JEPA latent."
+                        " Recommended for contact-rich tasks where a random-data encoder may omit"
+                        " rare fingertip/object geometry.")
     p.add_argument("--collapse-critic-loss", type=float, default=100.0)
     p.add_argument("--collapse-actor-loss", type=float, default=1000.0)
     p.add_argument("--collapse-ent-coef", type=float, default=0.5)
@@ -248,13 +252,14 @@ def main() -> None:
             flush=True,
         )
     else:
+        extractor_cls = JEPALatentRawExtractor if args.concat_raw else JEPALatentExtractor
         model = TQC(
             "MultiInputPolicy",
             env,
             replay_buffer_class=HerReplayBuffer,
             replay_buffer_kwargs=dict(n_sampled_goal=4, goal_selection_strategy="future"),
             policy_kwargs=dict(
-                features_extractor_class=JEPALatentExtractor,
+                features_extractor_class=extractor_cls,
                 features_extractor_kwargs=dict(
                     model_path=str(args.jepa_model_path),
                     device=args.device,
