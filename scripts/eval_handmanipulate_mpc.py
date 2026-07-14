@@ -49,7 +49,12 @@ class LatentMPC:
         A = self.spec.action_dim
         sn = torch.from_numpy(self.norm.encode(raw)).unsqueeze(0).to(self.dev)
         z = self.wm.encode(sn)
-        dg = sn[0, self.dg_lo:self.dg_hi]              # normalized desired object pose (fixed)
+        # Score in the environment's PHYSICAL goal geometry, not z-scored state
+        # space: quaternion components cannot be compared component-wise (a
+        # sign-equivalent quaternion is the same orientation but has large
+        # per-dim error). Use the simulator's own dense surrogate,
+        # 10*position_distance + quaternion_geodesic_angle.
+        raw_dg = torch.as_tensor(raw[self.dg_lo:self.dg_hi], dtype=torch.float32, device=self.dev)
         lo = torch.as_tensor(env.action_space.low, dtype=torch.float32, device=self.dev)
         hi = torch.as_tensor(env.action_space.high, dtype=torch.float32, device=self.dev)
         mean = torch.zeros(self.H, A, device=self.dev)
@@ -59,12 +64,22 @@ class LatentMPC:
             eps = torch.randn(self.N, self.H, A, device=self.dev)
             acts = (mean.unsqueeze(0) + std.unsqueeze(0) * eps).clamp(lo, hi)
             roll = self.wm.predict_rollout(z.expand(self.N, -1), acts, self.H)  # [N,H,latent]
-            pred = self.wm.state_probe(roll)                                    # normalized state
-            pred_ag = pred[:, :, self.ag_lo:self.ag_hi]                         # [N,H,goal]
-            dist = (pred_ag - dg.view(1, 1, -1)).pow(2).sum(-1)                 # [N,H]
+            pred = self.norm.decode_tensor(self.wm.state_probe(roll))          # raw state
+            pred_ag = pred[:, :, self.ag_lo:self.ag_hi]                         # [N,H,7]
+            pos_dist = torch.linalg.vector_norm(pred_ag[:, :, :3] - raw_dg[:3], dim=-1)
+            qa = pred_ag[:, :, 3:]
+            qa = qa / torch.linalg.vector_norm(qa, dim=-1, keepdim=True).clamp_min(1e-6)
+            qb = raw_dg[3:].view(1, 1, 4)
+            qb = qb / torch.linalg.vector_norm(qb, dim=-1, keepdim=True).clamp_min(1e-6)
+            dot = (qa * qb).sum(-1).abs().clamp(max=1.0)                        # abs = quaternion double cover
+            rot_dist = 2.0 * torch.acos(dot)                                   # geodesic angle [N,H]
+            dist = 10.0 * pos_dist + rot_dist
             cost = dist[:, -1] + 0.25 * dist.mean(1)                           # terminal + path
-            if self.disagree_w > 0:
-                cost = cost + self.disagree_w * self.wm.disagreement(z.expand(self.N, -1), acts, self.H)
+            if self.disagree_w > 0 and getattr(self.wm, "ensemble_heads", 1) > 1:
+                # per-candidate epistemic uncertainty (batch-mean disagreement()
+                # would add the same scalar to every candidate and do nothing)
+                head_rolls = self.wm.rollout_heads(z.expand(self.N, -1), acts, self.H)
+                cost = cost + self.disagree_w * head_rolls.var(dim=0).mean(dim=(1, 2))
             order = torch.argsort(cost)
             elite = acts[order[: self.elite]]
             mean, std = elite.mean(0), elite.std(0).clamp_min(0.02)

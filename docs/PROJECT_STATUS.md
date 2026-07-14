@@ -26,14 +26,16 @@ latent subgoals.
 | FetchPickAndPlace | SSL replacement solved | inverse prior + JEPA chunk selection, 1.00 |
 | FetchSlide | Not SSL-replaced | JEPA-latent TQC/HER retained, 0.83 |
 | PointMaze UMaze/Medium/Large | SSL replacement solved (Dijkstra retired) | HWM flow-macro-prior high level + directed flow walker, 1.00/1.00/1.00 (matches the legacy graph+inverse; no Dijkstra) |
-| AntMaze UMaze | SSL replacement solved | HWM flow-macro-prior high level + directed flow walker (no Dijkstra), 0.867/60 |
-| AntMaze Medium | Improved (open) | HWM flow-macro-prior high level + directed flow walker, 0.39/80 (beats graph 0.26 and Gaussian-CEM 0.067); below historical HIQL ~0.77 |
-| AntMaze Large | Improved (open) | HWM flow-macro-prior high level + directed flow walker, 0.18/60 reproducible (was 0.00) |
+| AntMaze UMaze | SSL replacement solved | HWM flow-macro + directed walker + SAC-distilled recovery flow + replan-2 + low-timeout 60, 0.95/60 (1.00/0.90/0.95; was 0.867/60, historical best ~0.93) |
+| AntMaze Medium | Improved (at historical-HIQL parity) | HWM flow-macro + progress-cond walker (target 1.0) + SAC-distilled recovery flow + replan-2 + low-timeout 60, 0.7375/80 (was 0.39/80); historical HIQL ~0.77 |
+| AntMaze Large | Improved (at historical-HIQL parity) | same recipe as Medium, 0.483/60 (was 0.18/60); historical HIQL ~0.54 |
 | Adroit Door | SSL replacement solved | schedule-phase inverse, 1.00/30; old BC removed |
 | Adroit Hammer | SSL replacement solved | p4 schedule-phase inverse, 1.00/30 fresh validation; old BC removed |
 | Adroit Pen | SSL replacement solved | raw+latent future flow, 0.90/30; old BC removed |
 | Adroit Relocate | Open (very close, gap ~0.045) | retained BC 1.00; best SSL: dual possession-specialist inverse (firm 0.045 switch) on demo-locked futures with palm-ball-emphasis reach + ball-target-emphasis held specialists, 0.957/210 on held-out seeds |
 | FrankaKitchen | SSL replacement solved (reproducible) | subtask-specialist inverse controller: 0.813 full-4 / ~3.63 mean tasks over 150 eps (6 seeds); held-out 5-seed 0.816/125 |
+| HandManipulate Block/Egg (full) | Open, controller-bound | demo-free SSL; WM solved, but MPC/flow controllers ~0 on full-pose (see ledger) |
+| HandManipulateBlockRotateZ (stepping stone) | Open, ~0.05-0.10 demo-free SSL | geodesic-supervised DexterousJEPA (7.9° H=8) + future-conditioned flow; flow breaks the finger-gaiting regrasp ceiling (65° sustained rotation) but directed control caps ~30-40° closed; fine CEM converts a minority of episodes. Stronger models (DiT/CFG/rotation-weighted/self-goaling) did not crack directional chaining |
 
 ## Replacement Rules
 
@@ -92,6 +94,37 @@ latent subgoals.
   Dijkstra graph** to the same flow-macro HWM + directed flow walker paradigm
   (U/M/L 1.00/1.00/1.00, matching the old graph+inverse), so no maze task uses
   Dijkstra anymore. See EXPERIMENT_LEDGER for recipes and A/Bs.
+- **AntMaze Medium/Large (improved again 2026-07-11, reproducible): the
+  "imitation-speed ceiling" was a misdiagnosis — the real bottleneck is the ant
+  FLIPPING onto its back.** New `--walk-diagnostics` showed the canonical
+  controller spends ~38-57% of eval steps with the torso inverted (demos contain
+  zero flipped states, so a flipped walker is off-manifold and flails until the
+  1000-step timeout); per-seed success is nearly monotone in flip fraction, and
+  every speed lever (best-of-N argmax/quantile chunk selection, progress
+  conditioning alone) made success WORSE because faster gaits flip more. Fix =
+  **self-trial flip-recovery flow** (`train_recovery_walker.py`, mined from the
+  controller's own rollouts + OU-during-flip trials via
+  `collect_recovery_trials.py`; `--walker-recovery` switches the low level to it
+  while uprightness < 0.5) + **replan-2** (tighter closed loop) — and with
+  recovery in place the progress-conditioned walker (target 0.8) flips from
+  harmful to helpful. **Medium 0.60/80 (0.70/0.60/0.50/0.60, seeds 30000-33000,
+  was 0.39/80); Large 0.333/60 (0.40/0.20/0.40, seeds 30000-32000, was
+  0.18/60).** Flip-risk chunk veto was neutral-to-negative (flip outcome is
+  state-determined before chunk choice). **The decisive amplification: a SAC
+  dense-uprightness recovery SPECIALIST (`train_recovery_rl.py`, episodes reset
+  into flipped states restored from a bank mined from our own rollouts; RL used
+  ONLY as an offline data source) learned self-righting at 0.993 success in ~45
+  steps; distilling its 794 successful recoveries into the SSL recovery flow
+  (`..._recovery_flow_v3d.pt`) collapsed eval flips to 0.03-0.11 and doubled
+  realized speed to ~0.66/8 steps.** Pooling the sloppy natural/OU recoveries
+  with the crisp distilled skill was WORSE (0.60-0.65 vs 0.90 probe) — the
+  "never blur the expert manifold" law applies to recovery too. Final canonical
+  config (both mazes): HWM flow-macro (n=16, horizon 1) + progress-conditioned
+  directed walker (`--walker-target-progress 1.0`) + distilled recovery
+  (`--walker-recovery`) + `--walker-replan 2` + `--low-timeout 60`:
+  **Medium 0.7375/80 (0.75/0.85/0.75/0.60, seeds 30000-33000; historical HIQL
+  ~0.77), Large 0.483/60 (0.50/0.40/0.55, seeds 30000-32000; historical HIQL
+  ~0.54)** — historical-HIQL parity with a fully SSL runtime controller.
 - **FrankaKitchen (SOLVED this session, reproducible):** the Relocate recipe
   ported directly to the sequential task closes it. Four **segment-pure
   per-subtask inverse specialists** (microwave/kettle/light switch/slide

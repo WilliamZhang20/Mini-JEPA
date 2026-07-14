@@ -27,7 +27,7 @@ import torch
 os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("MINARI_DATASETS_PATH", "/u5/w223zhan/jepa-mini/.cache/minari")
 
-from jepa_robotics.data import load_episodes_npz
+from jepa_robotics.data import Episode, load_episodes_npz, save_episodes_npz
 from jepa_robotics.envs import flatten_obs, make_env, obs_spec_from_env
 from jepa_robotics.models import normalized_mse
 from jepa_robotics.tasks import resolve_task
@@ -110,7 +110,7 @@ def true_compounding_error(psi, macro, g, episodes, spec, normalizer, wm, dev, s
 
 
 def run_hwm_flow(env_id, max_steps, low, psi, g, dec, macro_flow, episodes, seed, dev, reach_radius, low_timeout,
-                 video_out=None, width=640, height=480, fps=30):
+                 video_out=None, width=640, height=480, fps=30, walk_diagnostics=False, rollout_out=None):
     """HWM flow-macro high level on top of the (unchanged) low level. Replans a
     subgoal (sampled feasible macro -> g -> decoded xy) when the low level REACHES
     the current subgoal (within reach_radius) or stalls on it for low_timeout
@@ -120,6 +120,9 @@ def run_hwm_flow(env_id, max_steps, low, psi, g, dec, macro_flow, episodes, seed
     fnet, fddpm, fcfg = macro_flow
     succ = []
     video_saved = False
+    diag = {"speed8": [], "stall_frac": [], "flip_frac": [], "replans": [],
+            "fail_steps": [], "fail_dist": []} if walk_diagnostics else None
+    rollouts = [] if rollout_out is not None else None
     for ep in range(episodes):
         capture = video_out is not None and not video_saved
         env = make_env(env_id, seed=seed + ep, max_episode_steps=max_steps,
@@ -129,6 +132,8 @@ def run_hwm_flow(env_id, max_steps, low, psi, g, dec, macro_flow, episodes, seed
         goal = np.asarray(obs["desired_goal"], np.float32)
         term = trunc = False; info = {}; t = 0; sg = goal; since_replan = 0; need_replan = True
         frames = []
+        xy_hist, upright_hist, n_replans = [], [], 0
+        ep_states, ep_actions = [flatten_obs(obs)], []
         if capture:
             fr = env.render()
             if fr is not None:
@@ -146,14 +151,35 @@ def run_hwm_flow(env_id, max_steps, low, psi, g, dec, macro_flow, episodes, seed
                 if np.linalg.norm(sg - goal) < reach_radius:
                     sg = goal
                 since_replan = 0; need_replan = False
+                n_replans += 1
             a = low.act(obs, sg)
             obs, _, term, trunc, info = env.step(a); t += 1; since_replan += 1
+            if rollouts is not None:
+                ep_actions.append(a); ep_states.append(flatten_obs(obs))
+            if diag is not None:
+                xy_hist.append(np.asarray(obs["achieved_goal"], np.float32))
+                q = np.asarray(obs["observation"][1:5], np.float32)  # torso quat (w,x,y,z)
+                upright_hist.append(1.0 - 2.0 * float(q[1] ** 2 + q[2] ** 2))  # body-z . world-z
             if capture:
                 fr = env.render()
                 if fr is not None:
                     frames.append(fr)
         s = float(info.get("is_success", info.get("success", 0.0)))
         succ.append(s)
+        if rollouts is not None:
+            rollouts.append(Episode(states=np.asarray(ep_states, np.float32),
+                                    actions=np.asarray(ep_actions, np.float32)))
+        if diag is not None and len(xy_hist) > 8:
+            xy = np.stack(xy_hist)
+            d8 = np.linalg.norm(xy[8:] - xy[:-8], axis=1)
+            up = np.asarray(upright_hist)
+            diag["speed8"].append(float(d8.mean()))
+            diag["stall_frac"].append(float((d8 < 0.2).mean()))
+            diag["flip_frac"].append(float((up < 0.0).mean()))
+            diag["replans"].append(n_replans)
+            if s < 0.5:
+                diag["fail_steps"].append(t)
+                diag["fail_dist"].append(float(np.linalg.norm(xy[-1] - goal)))
         env.close()
         if capture and s > 0.5 and frames:
             import imageio.v2 as imageio
@@ -161,6 +187,14 @@ def run_hwm_flow(env_id, max_steps, low, psi, g, dec, macro_flow, episodes, seed
             imageio.mimsave(video_out, frames[::2], fps=fps, format="FFMPEG")
             video_saved = True
             print(json.dumps({"event": "video_saved", "path": str(video_out), "episode": ep}), flush=True)
+    if diag is not None:
+        print(json.dumps({"event": "walk_diagnostics",
+                          **{k: round(float(np.mean(v)), 3) if v else None for k, v in diag.items()}}),
+              flush=True)
+    if rollouts is not None:
+        Path(rollout_out).parent.mkdir(parents=True, exist_ok=True)
+        save_episodes_npz(rollout_out, rollouts)
+        print(json.dumps({"event": "rollouts_saved", "path": str(rollout_out), "episodes": len(rollouts)}), flush=True)
     return float(np.mean(succ))
 
 
@@ -177,6 +211,25 @@ def main() -> None:
                    help="Low-level policy: flow-walker .pt (low-type flow) or BC .pt (low-type bc).")
     p.add_argument("--low-type", default="flow", choices=["flow", "bc"],
                    help="Low level under the HWM high level: 'flow' the directed flow-matching walker (canonical), or 'bc'.")
+    p.add_argument("--walker-scorer", type=Path, default=None,
+                   help="ProgressScorer checkpoint (train_walker_scorer.py) for best-of-N chunk selection in the flow walker.")
+    p.add_argument("--walker-samples", type=int, default=1,
+                   help="Chunks sampled per walker replan; the scorer picks the one with max predicted progress toward the subgoal.")
+    p.add_argument("--walker-target-progress", type=float, default=None,
+                   help="For a progress-conditioned walker: requested per-chunk xy progress (default: the training p90 stored in the walker checkpoint).")
+    p.add_argument("--walker-select-quantile", type=float, default=1.0,
+                   help="Quantile of scorer-ranked samples to execute (1.0 = argmax; sub-max avoids the winner's-curse tail).")
+    p.add_argument("--walk-diagnostics", action="store_true",
+                   help="Report realized 8-step xy speed, stall/flip fractions, replans, and failure step/distance aggregates.")
+    p.add_argument("--walker-replan", type=int, default=None,
+                   help="Execute only this many steps of each sampled chunk before resampling (default: the full chunk). Tighter closed loop = less open-loop commitment to destabilizing sequences.")
+    p.add_argument("--rollout-out", type=Path, default=None,
+                   help="Save the eval rollouts (states/actions npz, episode format) as self-trial data — e.g. for flip-risk/recovery training.")
+    p.add_argument("--walker-recovery", type=Path, default=None,
+                   help="Recovery flow checkpoint (train_recovery_walker.py); the walker switches to it while flipped.")
+    p.add_argument("--walker-risk-scorer", type=Path, default=None,
+                   help="Flip-risk scorer checkpoint (train_flip_risk_scorer.py) for the safe-chunk veto (needs --walker-samples > 1).")
+    p.add_argument("--walker-risk-threshold", type=float, default=0.5)
     p.add_argument("--jepa-model", type=Path, required=True)
     p.add_argument("--episodes-npz", type=Path, default=None,
                    help="Episodes for the (optional) macro-model diagnostics; not needed for control.")
@@ -200,7 +253,12 @@ def main() -> None:
 
     env = make_env(task.env_id, seed=args.seed, max_episode_steps=task.max_episode_steps)
     if args.low_type == "flow":
-        low = LowLevelFlow(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high, device=args.device)
+        low = LowLevelFlow(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high, device=args.device,
+                           replan=args.walker_replan,
+                           scorer_path=args.walker_scorer, n_samples=args.walker_samples,
+                           target_progress=args.walker_target_progress, select_quantile=args.walker_select_quantile,
+                           recovery_path=args.walker_recovery,
+                           risk_scorer_path=args.walker_risk_scorer, risk_threshold=args.walker_risk_threshold)
     else:
         low = LowLevelBC(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high, device=args.device)
     env.close()
@@ -224,7 +282,8 @@ def main() -> None:
     fcfg["horizon"] = args.macro_flow_horizon
     hwm = run_hwm_flow(task.env_id, task.max_episode_steps, low, psi, g, dec, (fnet, fddpm, fcfg),
                        args.episodes, args.seed, dev, args.reach_radius, args.low_timeout,
-                       video_out=args.video_out, width=args.width, height=args.height, fps=args.fps)
+                       video_out=args.video_out, width=args.width, height=args.height, fps=args.fps,
+                       walk_diagnostics=args.walk_diagnostics, rollout_out=args.rollout_out)
     print(json.dumps({"task": task.name,
                       "policy": f"H-JEPA-HWM (flow macro-prior, n={args.macro_flow_samples}, low={args.low_type})",
                       "episodes": args.episodes, "success_rate": round(hwm, 4)}), flush=True)

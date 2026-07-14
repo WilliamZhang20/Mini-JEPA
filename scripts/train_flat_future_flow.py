@@ -28,6 +28,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 from jepa_robotics.data import load_episodes_npz
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.algos.priors import EpsNet
+from jepa_robotics.models import DexterousFlowPrior
 from scripts.train_fetch_flow_prior import parse_horizons
 
 
@@ -43,6 +44,15 @@ def main() -> None:
     p.add_argument("--train-steps", type=int, default=50000)
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--hidden", type=int, default=512)
+    p.add_argument("--prior-arch", default="mlp", choices=["mlp", "dit"],
+                   help="dit = DexterousFlowPrior (per-action-step tokens + AdaLN-Zero); models multimodal dexterous chunks instead of MLP mode-averaging.")
+    p.add_argument("--heads", type=int, default=6, help="attention heads for the DiT prior")
+    p.add_argument("--cond-dropout", type=float, default=0.0,
+                   help="fraction of samples to zero the condition on, enabling classifier-free guidance (cfg_weight>1 at eval to amplify goal adherence).")
+    p.add_argument("--rotation-weighted", action="store_true",
+                   help="sample training pairs with probability rising in the object rotation over the horizon, so rare large-rotation GAITS (the skill) are not drowned by tiny-motion pairs.")
+    p.add_argument("--rotation-weight-temp", type=float, default=1.5,
+                   help="exponent on per-pair object-rotation-degrees for the sampling weight.")
     p.add_argument("--n-blocks", type=int, default=4)
     p.add_argument("--flow-steps", type=int, default=32)
     p.add_argument("--lr", type=float, default=3e-4)
@@ -80,7 +90,13 @@ def main() -> None:
     emph_lo = emph_hi = None
     if args.emphasis_dims is not None and args.emphasis_repeat > 0:
         emph_lo, emph_hi = (int(x) for x in args.emphasis_dims.split(","))
-    conds, chunks = [], []
+    conds, chunks, pair_rot = [], [], []
+    ag_q = spec.obs_dim + 3  # object quaternion slice start in the flat state
+
+    def _obj_rot_deg(qa, qb):
+        qa = qa / (np.linalg.norm(qa) + 1e-9); qb = qb / (np.linalg.norm(qb) + 1e-9)
+        return float(np.degrees(2.0 * np.arccos(min(1.0, abs(float(qa @ qb))))))
+
     bank_states, bank_futures = [], []
     with torch.no_grad():
         for ep in episodes:
@@ -116,6 +132,7 @@ def main() -> None:
                         parts.append(torch.from_numpy(norm_states_np[t, emph_lo:emph_hi]).to(dev).repeat(args.emphasis_repeat))
                     conds.append(torch.cat(parts, dim=-1))
                     chunks.append(torch.from_numpy(actions[t : t + H].reshape(-1)).to(dev))
+                    pair_rot.append(_obj_rot_deg(states[t, ag_q:ag_q + 4], states[t + future_h, ag_q:ag_q + 4]))
                 bank_states.append(states[t])
                 bank_futures.append(states[t + max(future_horizons)])
 
@@ -128,7 +145,12 @@ def main() -> None:
         bank_states_np = bank_states_np[idx]
         bank_futures_np = bank_futures_np[idx]
 
-    net = EpsNet(Chunk.shape[1], Cond.shape[1], args.hidden, n_blocks=args.n_blocks).to(dev)
+    if args.prior_arch == "dit":
+        net = DexterousFlowPrior(int(Chunk.shape[1]), int(Cond.shape[1]), hidden=args.hidden,
+                                 n_blocks=args.n_blocks, heads=args.heads,
+                                 action_dim=int(spec.action_dim)).to(dev)
+    else:
+        net = EpsNet(Chunk.shape[1], Cond.shape[1], args.hidden, n_blocks=args.n_blocks).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
     ema = {k: v.detach().clone() for k, v in net.state_dict().items()}
     ema_decay = 0.999
@@ -146,10 +168,20 @@ def main() -> None:
         ),
         flush=True,
     )
+    sample_w = None
+    if args.rotation_weighted:
+        w = torch.tensor(pair_rot, dtype=torch.float32, device=dev).clamp_min(1.0) ** args.rotation_weight_temp
+        sample_w = w / w.sum()
+        print(json.dumps({"event": "rotation_weighted", "median_pair_rot_deg": float(np.median(pair_rot)),
+                          "p95_pair_rot_deg": float(np.percentile(pair_rot, 95))}), flush=True)
     for step in range(1, args.train_steps + 1):
-        idx = torch.randint(0, Cond.shape[0], (args.batch_size,), device=dev)
+        idx = (torch.multinomial(sample_w, args.batch_size, replacement=True) if sample_w is not None
+               else torch.randint(0, Cond.shape[0], (args.batch_size,), device=dev))
         x1 = Chunk[idx]
         cond = Cond[idx]
+        if args.cond_dropout > 0:  # CFG: zero the whole condition on a fraction of samples
+            drop = (torch.rand(cond.shape[0], device=dev) < args.cond_dropout).unsqueeze(1)
+            cond = torch.where(drop, torch.zeros_like(cond), cond)
         x0 = torch.randn_like(x1)
         tau = torch.rand(x1.shape[0], device=dev)
         xt = (1.0 - tau)[:, None] * x0 + tau[:, None] * x1
@@ -179,6 +211,8 @@ def main() -> None:
             "n_blocks": int(args.n_blocks),
             "diffusion_steps": int(args.flow_steps),
             "objective": "flow",
+            "prior_arch": args.prior_arch,
+            "heads": int(args.heads),
             "conditioning": "z_t_z_future",
             "future_horizons": future_horizons,
             "concat_raw": bool(args.concat_raw),

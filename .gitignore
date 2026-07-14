@@ -20,7 +20,7 @@ eval_results/
 *.ckpt
 *.zip
 *.jsonl
-runs/**/data/*.npz
+*.npz
 
 # Local scratch/output
 .tmp/

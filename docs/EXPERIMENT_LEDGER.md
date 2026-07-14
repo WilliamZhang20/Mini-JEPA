@@ -541,6 +541,78 @@ never propose wall-crossing subgoals -- the exact failure Gaussian CEM had.
   Remaining gap to HIQL (~0.77 Medium) is still the walker's gait speed on
   far-goal episodes.
 
+Session 2026-07-11 (flip diagnosis + self-trial recovery; Medium 0.39 -> 0.60,
+Large 0.18 -> 0.333):
+
+- **Speed-extraction levers all NEGATIVE, and the reason rewrites the
+  diagnosis.** The demos are bimodal (60% of 8-step windows move < 0.2 xy, the
+  moving mode reaches 1.09/1.24/1.49 at p90/p95/p99), so "extract the fast mode"
+  looked plausible: (a) best-of-16 chunks ranked by a progress scorer
+  (`train_walker_scorer.py`, holdout MAE 0.049) — argmax 0.163/80 vs baseline
+  0.39; quantile 0.75/0.5 on seed 30000: 0.25/0.35 vs 0.55 baseline (monotone:
+  more selection pressure = worse); (b) progress-conditioned flow walker
+  (`train_flow_walker.py --progress-cond`, request p90=1.22) — 0.10 on seed
+  30000 with 63% of steps flipped.
+- **Root cause via `eval_hjepa_hwm.py --walk-diagnostics`: the ant spends
+  ~38-57% of eval steps FLIPPED** (torso body-z·world-z < 0); every failure is a
+  1000-step timeout stranded ~11-17 from goal; per-seed success is nearly
+  monotone in flip fraction (self-trial seeds: flip 0.24 -> 0.65 success, 0.57
+  -> 0.10). Demos never flip, so a flipped walker is off-manifold and cannot
+  self-right (natural recovery rate ~1.2% per 8-step window; OU flailing is
+  even worse: 33 recoveries in 88k flipped steps). Speed levers fail because
+  faster gaits flip more, and one flip costs the rest of the episode.
+- **Flip-risk chunk veto (train_flip_risk_scorer.py): NEGATIVE/neutral.**
+  S(cond, chunk) -> min uprightness (holdout MAE 0.019, i.e., near-perfectly
+  predictable) — but vetoing risky chunks did not cut realized flips
+  (0.30-0.35/20 on probe seeds): flip outcome is determined by the state before
+  the chunk choice, so selection arrives too late.
+- **Self-trial flip-recovery flow (the decisive fix,
+  `train_recovery_walker.py`): mine chunks that start tipped (uprightness <
+  0.5) and raise it >= 0.15 from the controller's OWN rollouts**
+  (`--rollout-out` self-trials + `collect_recovery_trials.py` OU-during-flip
+  trials; 3,518 chunks from 300 episodes), fit a goal-free rectified flow on
+  (JEPA latent | raw obs), and switch the low level to it while uprightness <
+  0.5 (exit 0.7, `--walker-recovery`). Plus **replan-2** (`--walker-replan 2`,
+  execute 2 of 8 chunk steps; alone: 0.50 vs 0.45-0.55 baseline, neutral).
+  Probe seeds 30000/54000: recovery v2 + replan-2 = 0.60/0.55 (baseline
+  0.45-0.55/0.10).
+- **With recovery installed, progress conditioning INVERTS from harmful to
+  helpful** (the flip tax is now bounded): progcond target 0.8 + recovery v2 +
+  replan-2 on seed 30000 = 0.75 (flip 0.215, stall 0.251, speed8 0.555 vs
+  baseline 0.34). **Full protocol Medium: 0.60/80 (0.70/0.60/0.50/0.60, seeds
+  30000-33000)** vs canonical 0.39/80. Checkpoints:
+  `antmaze_medium_flow_progcond.pt`, `antmaze_medium_recovery_flow_v2.pt`.
+- **Large: recovery + replan-2 = 0.333/60 (0.40/0.20/0.40, seeds 30000-32000)**
+  vs 0.18/60; progcond added nothing on Large (0.35/0.25/0.40) — recovery
+  quality, not speed, is the binding constraint there. Checkpoints:
+  `antmaze_large_recovery_flow.pt`, `antmaze_large_flow_progcond.pt`.
+- **SAC recovery specialist + distillation (the amplification,
+  `train_recovery_rl.py`): 0.993 self-righting success in ~45 steps** after
+  400k SAC steps on dense uprightness-delta reward with episodes reset into
+  flipped states (qpos/qvel restored from a 6k-state bank mined from our own
+  rollout npz). 794 successful recoveries distilled into the recovery flow
+  (`antmaze_medium_recovery_flow_v3d.pt`; the same distill npz re-encoded per
+  maze gives `antmaze_{umaze,large}_recovery_flow_v3d.pt` — recovery is local
+  physics, it transfers across mazes). Probe seeds 30000/54000 with progcond
+  0.8 + replan-2: **0.90/0.90** (flip 0.035/0.106, speed8 0.66). Pooling
+  natural/OU chunks with the distilled skill was WORSE (0.60/0.65) — never blur
+  the expert manifold, including for recovery.
+- **Final canonical config + protocol numbers:** HWM flow-macro (n=16, horizon
+  1) + progcond walker `--walker-target-progress 1.0` + `--walker-recovery
+  ..._recovery_flow_v3d.pt` + `--walker-replan 2` + `--reach-radius 1.0
+  --low-timeout 60`: **Medium 0.7375/80** (0.75/0.85/0.75/0.60, seeds
+  30000-33000; tp sweep at lt90: 0.8 -> 0.6875, 1.0 -> 0.6875, 1.22 -> worse;
+  lt60 > lt90; macro-samples 32 neutral). **Large 0.483/60** (0.50/0.40/0.55,
+  seeds 30000-32000; with the weak pooled recovery it was 0.333-0.367).
+  Historical HIQL ~0.77 Medium / ~0.54 Large — parity, with the runtime
+  controller fully SSL (RL appears only as an offline data source for the
+  self-righting skill, mirroring the repo's demo/data-source pattern).
+- **UMaze with the same recipe (directed walker, no progcond needed):
+  0.95/60** (1.00/0.90/0.95, seeds 30000-32000) — up from 0.867/60 and past the
+  historical H-JEPA+BC ~0.93. The Medium distill npz re-encoded with the UMaze
+  JEPA (`antmaze_umaze_recovery_flow_v3d.pt`) transferred without any
+  UMaze-specific recovery data.
+
 ## FrankaKitchen
 
 Previous best/SOTA in this repo: historical `kitchen_flow_skill_ft3.pt` logs
@@ -679,3 +751,85 @@ Why these do not work yet relative to the retained RL baseline:
   reliably predict long puck coasting under friction.
 - The task likely needs a strike-specific latent objective or impulse prior
   rather than generic future-conditioned chunk imitation.
+
+## HandManipulate (Shadow Hand in-hand reorientation)
+
+Demo-free SSL on the `handmanipulate_block_rotate_z` stepping stone (single-axis
+Z rotation, position ignored, success = rotation < 0.1 rad). 150k-step OU
+exploration only; no reward, no demos. New task preset in `jepa_robotics/tasks.py`.
+
+What was established (all measured):
+
+- **World model is solved.** Geodesic-supervised DexterousJEPA (new
+  `--object-dims`/`--lambda-object` + `quat_geodesic_loss` in
+  `train_dexterous_jepa.py`) predicts object orientation at H=8 with 7.9 deg
+  error vs a 15 deg no-motion baseline. The earlier "WM can't predict" reading
+  was on a checkpoint whose object supervision was reverted; rollout-decode +
+  geodesic supervision fixes it.
+- **The primitive is direction-controllable** (`eval_subgoal_controllability.py`):
+  reaching a small Z subgoal succeeds 0.975 @15 deg, 0.475 @30 deg, vs random
+  0.30/0.05. But single-shot control saturates ~25-30 deg of gap-closed
+  regardless of goal distance.
+- **Greedy planners hit a regrasp ceiling.** CEM and MPPI with SO(3) subgoal
+  chaining (`eval_hierarchical_reorient.py`) both stall ~25 deg closed (best
+  0.13), because continuing a rotation needs a finger-gait that *temporarily
+  raises* the cost and a myopic minimizer never proposes it.
+- **A future-conditioned FLOW prior breaks the ceiling.** Trusting raw flow
+  samples (no greedy re-selection) gives sustained 65-68 deg rotation with
+  visible regrasp cycles (`eval_dexterous_flow.py` + `train_flat_future_flow.py`
+  on the DexterousJEPA). This is the core positive result: gaiting emerges from
+  pure SSL (JEPA + hindsight + flow).
+
+Why RotateZ is still NOT solved (honest negative, ~3h of stronger-model search):
+
+- Directed control caps at ~30-40 deg gap-closed against EVERY architecture
+  tried: MLP flow, DiT `DexterousFlowPrior` (chunk-8 and chunk-16), object-pose
+  input emphasis, classifier-free guidance (`--cond-dropout`/`--cfg-weight`),
+  rotation-weighted gait sampling (`--rotation-weighted`), synthetic vs
+  bank-retrieved goal conditioning, a fine CEM precision stage (`--fine-deg`),
+  and a 2-chunk latent lookahead selection.
+- Structural reason: a regrasp goes backward-then-forward, so hard
+  forward-progress selection rejects it; undirected trust-prior keeps regrasps
+  but cannot steer; CFG/rotation-weighting did not make the raw samples
+  directional enough; and the WM, accurate for ~15 deg motions, is not reliable
+  enough to *select* among large-rotation gaits or to chain 32 latent steps.
+- Self-goaling SSL loop (`train_selfgoal_ssl.py`): 4 rounds of directed-data
+  generation + WM/flow retraining. Self-goal reach 0.50 -> 0.40 -> 0.25 as the
+  curriculum frontier widened 45 -> 70 -> 95 deg, then the frontier stalled.
+  Real-task success stayed ~0.0.
+- **Best real-task result: ~0.05-0.10/20 (seed-dependent), median final gap
+  ~75-95 deg.** Nonzero comes almost entirely from the fine CEM converting the
+  minority of episodes whose coarse rotation drifted close; not a systematic
+  solve.
+
+Bottom line: stronger action-prior models move demo-free RotateZ from 0.0 to
+~0.1 but do not crack directional chaining under OU/self-goal data in a
+single-session budget. A real unlock likely needs either substantially more
+directed data than the self-goaling loop produced before plateauing, or a
+non-greedy long-horizon planner that explicitly tolerates the regrasp cost.
+The regrasp-ceiling break via flow is the transferable finding.
+
+### HandManipulate RotateZ — literature-grounded long-horizon planning round (2026-07-13)
+
+After a research pass (GC-PMPC arXiv:2504.21585 gets 70-80% demo-free with CEM-MPC
+at horizon 30-50; iCEM arXiv:2008.06389; Contact-Implicit MPC arXiv:2402.18897 adds
+a finger-reset term), built the full stack — still pure SSL (self-supervised world
+model + planning; NO policy/value/reward, NO demos):
+
+- Long-horizon WM (`_wm_h32.pt`, H up to 32; rot-err 15 deg at H=32 vs 25 deg
+  baseline — holds up).
+- iCEM planner (`eval_handmanipulate_icem.py`): FFT colored noise (beta=2.5),
+  keep-and-shift elite memory, contact-breaking finger-motion bonus, disagreement
+  penalty.
+- GC-PMPC on-policy loop (`train_dexterous_mbrl.py`): iCEM <-> WM retrain.
+
+Result: **long-horizon iCEM breaks the ceiling** (object gaits ~70 deg vs the
+~25 deg greedy cap), confirming the literature that gaiting emerges from
+long-horizon planning. But it WANDERS rather than converging: success ~0.05,
+median final gap ~80-92 deg. Cause: WM 8-step error ~12 deg on iCEM's own actions
+vs ~8 deg on OU (model exploitation), and 15 deg WM error at H=32 caps terminal
+precision below the 5.7 deg threshold. The on-policy MBRL loop did NOT bootstrap
+(0.05 -> 0.025 -> 0.0 -> 0.0 over 4 rounds). Demo-free RotateZ best stays
+~0.05-0.10 after flow, long-horizon iCEM, and the on-policy loop. Gap to
+GC-PMPC's 70-80% not closed in a single session; their probabilistic-ensemble WM
+(variance penalty/batchnorm/2-step) + more episodes are the likely difference.

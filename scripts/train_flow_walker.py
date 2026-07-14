@@ -128,6 +128,8 @@ def main() -> None:
                    help="[directed] keep a sample only if the ant closes at least this much xy distance to the relabeled goal over the chunk.")
     p.add_argument("--speed-weight", type=float, default=0.0,
                    help="[directed] bias training sampling toward faster segments: p ~ progress^speed_weight. Keeps slow turning segments (unlike a hard filter) but speeds up the gait. 0 = uniform.")
+    p.add_argument("--progress-cond", action="store_true",
+                   help="[directed] append the chunk's realized xy progress to the flow conditioning. At eval the walker requests a high demonstrated value (default: the p90 stored in the checkpoint), steering sampling into the fast gait mode without leaving the data manifold.")
     p.add_argument("--concat-raw", action="store_true",
                    help="condition on [JEPA latent | raw normalized obs] (kitchen fix for control precision)")
     p.add_argument("--emphasis-repeat", type=int, default=0,
@@ -165,6 +167,12 @@ def main() -> None:
     if args.emphasis_repeat > 0:
         delta = (St[:, g_lo:g_hi] - St[:, a_lo:a_hi]).repeat(1, args.emphasis_repeat)
         cond = torch.cat([cond, delta], dim=1)
+    progress_stats = None
+    if args.progress_cond:
+        if prog is None:
+            raise SystemExit("--progress-cond requires --directed (needs per-chunk realized progress).")
+        progress_stats = {f"p{q}": round(float(np.percentile(prog, q)), 4) for q in (50, 75, 90, 95)}
+        cond = torch.cat([cond, torch.from_numpy(prog).to(dev).unsqueeze(1)], dim=1)
     Ct = torch.from_numpy(C.reshape(len(C), -1)).to(dev)
     chunk_dim = Ct.shape[1]; cond_dim = cond.shape[1]; N = len(cond)
     # Speed-weighted sampling: bias training toward the FASTER directed segments
@@ -201,6 +209,8 @@ def main() -> None:
                            "chunk_dim": chunk_dim, "cond_dim": cond_dim, "latent_dim": int(cfg["latent_dim"]),
                            "concat_raw": bool(args.concat_raw),
                            "emphasis_repeat": int(args.emphasis_repeat),
+                           "progress_cond": bool(args.progress_cond),
+                           "progress_stats": progress_stats,
                            "agent_dims": [a_lo, a_hi], "goal_dims": [g_lo, g_hi]}},
                args.out)
     print(json.dumps({"event": "flow_saved", "path": str(args.out)}), flush=True)

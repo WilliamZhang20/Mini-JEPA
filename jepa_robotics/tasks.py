@@ -123,6 +123,19 @@ TASKS = {
         max_episode_steps=100,
         horizons="1,2,4,8,16",
     ),
+    # Stepping-stone for the hierarchical-JEPA + dexterous-flow SSL bet: single-axis
+    # (Z) rotation with position IGNORED, so "direction" is an unambiguous scalar
+    # (CW/CCW) and success only needs the rotation threshold. Used to test whether a
+    # small reorientation is direction-controllable at all (the primitive the
+    # abstract SO(3) planner would compose) before building the full stack.
+    "handmanipulate_block_rotate_z": TaskConfig(
+        name="handmanipulate_block_rotate_z",
+        env_id="HandManipulateBlockRotateZ-v1",
+        slug="handmanipulate_block_rotate_z",
+        controller="none",
+        max_episode_steps=100,
+        horizons="1,2,4,8,16",
+    ),
     "handmanipulate_pen": TaskConfig(
         name="handmanipulate_pen",
         env_id="HandManipulatePen-v1",
