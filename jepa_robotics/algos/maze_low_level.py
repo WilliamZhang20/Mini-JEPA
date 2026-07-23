@@ -29,8 +29,8 @@ class LowLevelBC:
         self.dev = torch.device(device)
         self.model, self.norm, self.spec, _ = load_jepa_artifact(Path(wm_path), self.dev)
         self.policy, pcfg = load_policy_artifact(Path(bc_path), self.dev)
-        # A raw policy (train_gcrl_raw.py) acts on the normalized observation
-        # directly; a latent policy acts on the JEPA encoding of it.
+        # Some legacy demonstration policies act on the normalized observation
+        # directly; latent policies act on the JEPA encoding of it.
         self.raw = bool(pcfg.get("raw", False))
         self.model.eval(); self.policy.eval()
         self.low, self.high = low, high
@@ -83,11 +83,10 @@ class LowLevelFlow:
     at the live subgoal. Config is read from the checkpoint."""
 
     def __init__(self, wm_path, bc_path, low, high, device="cpu", replan=None, flow_steps=10,
-                 scorer_path=None, n_samples=1, target_progress=None, select_quantile=1.0,
-                 recovery_path=None, recovery_exit=0.7, risk_scorer_path=None, risk_threshold=0.5):
+                 scorer_path=None, n_samples=1, target_progress=None, select_quantile=1.0):
         import torch
         from jepa_robotics.evaluate import load_jepa_artifact
-        from scripts.train_flow_walker import FlowNet
+        from jepa_robotics.algos.control.flow import build_flow_net
         self._torch = torch
         self.dev = torch.device(device)
         self.model, self.norm, self.spec, _ = load_jepa_artifact(Path(wm_path), self.dev)
@@ -95,7 +94,13 @@ class LowLevelFlow:
         cfg = art["config"]
         self.chunk = int(cfg["chunk"]); self.action_dim = int(cfg["action_dim"])
         self.concat_raw = bool(cfg["concat_raw"]); self.chunk_dim = int(cfg["chunk_dim"])
-        self.net = FlowNet(int(cfg["chunk_dim"]), int(cfg["cond_dim"]), int(cfg["hidden"])).to(self.dev)
+        self.net = build_flow_net(
+            int(cfg["chunk_dim"]),
+            int(cfg["cond_dim"]),
+            int(cfg["hidden"]),
+            architecture=str(cfg.get("flow_architecture", "mlp")),
+            n_blocks=int(cfg.get("flow_blocks", 4)),
+        ).to(self.dev)
         self.net.load_state_dict(art["flow"]); self.net.eval(); self.model.eval()
         self.low, self.high = low, high
         self.replan = replan or self.chunk
@@ -125,53 +130,10 @@ class LowLevelFlow:
             stats = cfg.get("progress_stats") or {}
             self.target_progress = float(target_progress if target_progress is not None
                                          else stats.get("p90", 1.0))
-        # Flip-risk veto (train_flip_risk_scorer.py): among n_samples gait chunks,
-        # discard those whose predicted min uprightness over the chunk falls below
-        # risk_threshold, then pick RANDOMLY among the safe ones — selection
-        # pressure for safety only, no winner's-curse speed chasing.
-        self.risk_scorer = None
-        if risk_scorer_path is not None and self.n_samples > 1:
-            self.risk_scorer = ProgressScorer.load(risk_scorer_path, self.dev)
-            self.risk_threshold = float(risk_threshold)
-        # Self-trial flip recovery (train_recovery_walker.py): when live torso
-        # uprightness drops below the trained enter threshold, sample chunks from
-        # the recovery prior (conditioned on [latent | raw], goal-free) until
-        # uprightness clears recovery_exit (hysteresis), then resume the gait.
-        # The demos contain no flipped states, so the gait flow alone flails
-        # off-manifold after a flip until episode timeout.
-        self.recovery = None
-        if recovery_path is not None:
-            art_r = torch.load(Path(recovery_path), map_location=self.dev, weights_only=False)
-            rcfg = art_r["config"]
-            self.recovery = FlowNet(int(rcfg["chunk_dim"]), int(rcfg["cond_dim"]), int(rcfg["hidden"])).to(self.dev)
-            self.recovery.load_state_dict(art_r["flow"]); self.recovery.eval()
-            self.recovery_chunk_dim = int(rcfg["chunk_dim"])
-            self.recovery_enter = float(rcfg["enter"])
-            self.recovery_exit = float(recovery_exit)
-            self._recovering = False
         self._buf = []
         self._last_sg = None
 
     def act(self, obs, subgoal):
-        if self.recovery is not None:
-            q = np.asarray(obs["observation"][1:5], np.float32)
-            upright = 1.0 - 2.0 * float(q[1] ** 2 + q[2] ** 2)
-            was = self._recovering
-            self._recovering = upright < (self.recovery_exit if was else self.recovery_enter)
-            if self._recovering != was:
-                self._buf = []  # mode switch: resample immediately
-            if self._recovering:
-                if not self._buf:
-                    o = {k: np.array(v, copy=True) for k, v in obs.items()}
-                    s = self._torch.from_numpy(self.norm.encode(flatten_obs(o))).unsqueeze(0).to(self.dev)
-                    with self._torch.no_grad():
-                        z = self.model.encode(s)
-                        x = self.recovery.sample(self._torch.cat([z, s], dim=1),
-                                                 self.recovery_chunk_dim, self.flow_steps)[0].cpu().numpy()
-                    self._buf = list(x.reshape(self.chunk, self.action_dim)[: self.replan])
-                    self._last_sg = None  # force gait resample after recovery
-                a = self._buf.pop(0)
-                return np.clip(a, self.low, self.high).astype(np.float32)
         sg = np.asarray(subgoal, dtype=np.float32)
         if (not self._buf) or self._last_sg is None or np.linalg.norm(sg - self._last_sg) > 1e-6:
             o = {k: np.array(v, copy=True) for k, v in obs.items()}
@@ -189,14 +151,7 @@ class LowLevelFlow:
                     tp = self._torch.full((c.shape[0], 1), self.target_progress,
                                           dtype=c.dtype, device=self.dev)
                     c_flow = self._torch.cat([c, tp], dim=1)
-                if self.risk_scorer is not None:
-                    cn = c.repeat(self.n_samples, 1)
-                    xs = self.net.sample(c_flow.repeat(self.n_samples, 1), self.chunk_dim, self.flow_steps)
-                    pred_u = self.risk_scorer.score(cn, xs)
-                    safe = (pred_u > self.risk_threshold).nonzero().flatten()
-                    pick = int(safe[0]) if len(safe) else int(pred_u.argmax())
-                    x = xs[pick].cpu().numpy()
-                elif self.scorer is not None:
+                if self.scorer is not None:
                     cn = c.repeat(self.n_samples, 1)
                     xs = self.net.sample(c_flow.repeat(self.n_samples, 1), self.chunk_dim, self.flow_steps)
                     order = self.scorer.score(cn, xs).argsort()

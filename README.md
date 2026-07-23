@@ -15,9 +15,9 @@ hand:
 | base | FetchReach / Push / PickAndPlace | JEPA MPC / flow-prior+JEPA selection / inverse-prior+JEPA selection | 1.00 / 1.00 / 1.00 |
 | 1 | **FetchSlide** (ballistic strike) | goal-frame equivariant ballistic JEPA HWM | **0.853/2000** |
 | 2 | **PointMaze** UMaze / Medium / Large | **H-JEPA + inverse low level** | 1.00 / 1.00 / 1.00 |
-| 2 | **AntMaze** UMaze (8-DoF ant) | Hierarchical JEPA | 0.93 |
+| 2 | **AntMaze** UMaze / Medium / Large | H-JEPA + unified conditional flow | 1.00 / 0.775 / 0.533 |
 | 3 | **Adroit** Door / Hammer / Pen / Relocate | SSL future-conditioned specialists | 1.00 / 1.00 / 0.90 / 0.957 |
-| 4 | **FrankaKitchen** | demo-handoff graph + inverse specialists + learned completion | 0.87/100 reordered 4-task check; 0.05/20 full-7 (4.9/7 mean, env switch) |
+| 4 | **FrankaKitchen** | demo-handoff graph + live-relocking inverse specialists + learned completion | 0.80/100 reordered four-task multi-seed check; full-7 remains open |
 
 The repo is deliberately organized around self-supervised world models rather
 than reward-optimized agents. Demos/trials specify desirable futures and transition
@@ -52,7 +52,7 @@ and are documented in
   FetchPickAndPlace's SSL inverse-chunk replacement: train
   `inverse(z_t, z_future) -> a_{t:t+H-1}` from trial transitions and rank noisy
   candidates through the JEPA world model. The same inverse-prior artifact can
-  now serve as an H-JEPA low level in `eval_hjepa_maze.py --low-type inverse`.
+  now serve as an H-JEPA low level under `scripts/eval/eval_hjepa_hwm.py`.
 - `scripts/train_flat_future_inverse.py` / `scripts/eval_flat_future_inverse.py`:
   flat-task Adroit experiment: retrieve a nearby demo future state, condition the
   inverse prior on its latent, and execute/rank chunks without copying the demo
@@ -60,7 +60,8 @@ and are documented in
 - `scripts/train_flat_future_flow.py` / `scripts/eval_flat_future_flow.py`:
   flat-task flow version of the same idea. It samples action chunks from
   `flow(a_chunk | z_t, z_future)` and optionally appends normalized raw
-  current/future states for high-DoF proprioceptive precision.
+  current/future states for high-DoF proprioceptive precision. Maze low levels
+  use the same inverse/flow family under `scripts/eval/eval_hjepa_hwm.py`.
 - `scripts/train_phase_future_inverse.py` / `scripts/eval_phase_future_inverse.py`:
   hierarchical Adroit variant. Demonstrations are split into self-supervised
   progress phases, the high level advances a phase/subgoal schedule, and the low
@@ -126,7 +127,7 @@ and are documented in
 - `scripts/{data,train,eval}/`: categorized CLI entry points; legacy root names
   are compatibility launchers during migration. `scripts/` also contains Slurm
   entry points, the `train_eval_object_v2.sh` pipeline, the
-  Hierarchical-JEPA evaluator (`eval_hjepa_maze.py`), the offline-demo adapter
+  Hierarchical-JEPA evaluator (`eval/eval_hjepa_hwm.py`), the offline-demo adapter
   (`minari_to_npz.py`), world-model accuracy probe (`eval_wm_rollout.py`), and
   video recorders.
 - `docs/`: architecture/status notes and the experiment ledger for failed or
@@ -146,9 +147,9 @@ latent space:
 | FetchPickAndPlace | Inverse prior + JEPA chunk selection: 1.00 over 30 episodes, mean final distance 0.011. |
 | FetchSlide | Goal-frame equivariant event HWM: 0.848 and 0.857 on independent 1000-episode blocks (0.853/2000 aggregate). |
 | PointMaze | HWM flow-macro high level + inverse/flow low level: UMaze/Medium/Large = 1.00/1.00/1.00. |
-| AntMaze | HWM flow-macro high level + directed flow walker; see the checked per-layout results below. |
+| AntMaze | HWM flow-macro high level + unified condition-modulated flow walker; see the checked per-layout results below. |
 | Adroit | Door 1.00/30, Hammer 1.00/30, Pen 0.90/30, Relocate 0.957/210 with future-conditioned specialists. |
-| FrankaKitchen | Demo-handoff graph + inverse specialists + learned completion: reordered four-task 0.87/100; full-seven 0.05/20 and 4.9/7 mean. |
+| FrankaKitchen | Demo-handoff graph + live-relocking inverse specialists + learned completion: reordered four-task 0.80/100 over four fresh seeds; full-seven remains open. |
 
 ## A World Model Is Not A Controller
 
@@ -204,33 +205,31 @@ recalibration use no reward, value, critic, or policy gradients. Two independent
 Long mazes break flat goal-conditioned control: a straight-line-to-goal policy
 walks into walls because it cannot represent route topology.
 
-**Hierarchical JEPA (`eval_hjepa_maze.py`)** splits control into two timescales:
+**Hierarchical JEPA (`scripts/eval/eval_hjepa_hwm.py`)** splits control into two timescales:
 
 - **Low level** — a self-supervised inverse or directed-flow controller,
   `inverse(z_t, z_subgoal) -> a_{t:t+H-1}`, trained from transition trials.
-- **High level** — a **data-driven subgoal graph**: landmarks sampled in
-  achieved-goal (x, y) space, with an edge between two landmarks only if the agent
-  *empirically* got from one to the other within *k* steps. Edges therefore only
-  exist where trajectories actually went — i.e. **around** walls. Dijkstra plans a
-  subgoal path; the low level executes one subgoal at a time.
+- **High level** — a neural HWM predicts abstract macro futures. A conditional
+  flow proposes only demonstrated, wall-feasible macro transitions; the HWM
+  predicts their endpoints and selects the next subgoal. No stored graph or
+  Dijkstra route is used.
 
-This beats flat on **every** maze with the *same* low level:
+AntMaze uses one condition-modulated residual flow for both gait and
+self-righting behavior. The self-righting trajectories are mixed into ordinary
+training with randomized route goals, so the model infers the useful action
+mode from its JEPA/state condition. There is no posture threshold, named
+recovery state, or specialist switch at runtime.
 
-| Maze | Flat (low level → goal) | **Hierarchical JEPA** |
-| --- | ---: | ---: |
-| PointMaze UMaze | 1.00 with inverse low level | **1.00** |
-| PointMaze Medium | 1.00 with inverse low level | **1.00** |
-| PointMaze Large | 0.95 with inverse low level | **1.00** |
-| AntMaze UMaze (8-DoF ant) | 0.70 | **0.93** |
+| Maze | **Hierarchical JEPA** | Seed blocks |
+| --- | ---: | --- |
+| PointMaze UMaze / Medium / Large | **1.00 / 1.00 / 1.00** | checked per layout |
+| AntMaze UMaze | **1.00** | 1.00 / 1.00 / 1.00 (60 episodes) |
+| AntMaze Medium | **0.775** | 0.75 / 0.75 / 0.80 / 0.80 (80 episodes) |
+| AntMaze Large | **0.533** | 0.55 / 0.45 / 0.60 (60 episodes) |
 
-The win magnitude is set by the low level's competence: the hierarchy cannot
-reach subgoals the directed walker cannot execute reliably.
-There are two H-JEPA high-level styles in this repo: the empirical graph/Dijkstra
-planner above, and a neural high-level world model (`train_hjepa_hwm.py` /
-`eval_hjepa_hwm.py`) that predicts abstract macro futures. The neural high level
-is more generalizable in principle (it covers unseen macro pairs), but the
-checked AntMaze runs showed rollout compounding and wall-feasibility errors; the
-hard graph was more reliable on the benchmark layouts.
+The flow-macro hierarchy solves route topology; remaining Medium/Large failures
+are long-horizon locomotion stalls. The narrow block ranges are from fully
+seeded environment and flow sampling, rather than a selected rollout.
 
 ### Tier 3 — Adroit dexterous hand (24–30-DoF): mixed
 
@@ -297,12 +296,15 @@ oracle with a frozen JEPA+raw completion probe trained from aligned demo replay
 retains **0.784/125 full-4 and 3.58/4 mean tasks**. The newer high level no
 longer assumes the supplied order: it learns task-to-task handoff costs from
 specialist demo boundaries and solves the minimum-cost route over the requested
-set. A deliberately scrambled four-task request scores **0.87/100** with the
-all-task learned completion probe. The environment’s full seven-task vocabulary
-now has specialists and completion heads; the first full-7 run scores
-**0.05/20 complete and 4.9/7 mean** with environment switching. This is API and
-coverage generalization, not a claim that the seven-task chain is solved—the
-hinge cabinet remains the dominant failure.
+set. A deliberately scrambled four-task request scores **0.80/100** across four
+fresh seed blocks (0.88/0.76/0.80/0.76). Specialists may re-lock to a different
+demonstrated trajectory only when it matches the live handoff state materially
+better. The environment’s full seven-task vocabulary
+now has specialists and completion heads. A fresh three-seed validation with a
+task-count-scaled 490-step budget scores **0.017/60 complete and 4.22/7 mean**
+(0.05/0.00/0.00 blocks). This is API and coverage generalization, not a claim
+that the seven-task chain is solved—the hinge cabinet remains the dominant
+failure.
 
 The older flow/self-imitation progression below is retained as experiment
 history, not as the current result; its reported 0.90 checkpoint was not

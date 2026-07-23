@@ -43,7 +43,7 @@ from jepa_robotics.envs import make_env, obs_spec_from_env
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
 from jepa_robotics.algos.priors import EpsNet
-from scripts.train_hjepa_hwm import HighEncoder, MacroEncoder, MacroPredictor, SubgoalDecoder
+from jepa_robotics.algos.hwm import HighEncoder, MacroEncoder, MacroPredictor, SubgoalDecoder
 
 
 def main() -> None:

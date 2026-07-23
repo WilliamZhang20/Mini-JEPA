@@ -155,7 +155,7 @@ def main() -> None:
                    help="Upweight the --match-dims slice in demo-locked matching so re-localization tracks the reachability-determining features.")
     p.add_argument("--match-dims", default="0,9",
                    help="Demo-matching slice (lo,hi) upweighted by --geom-weight. Default 0,9 = robot arm joints (approach reachability); the object qpos is near-constant until manipulated so weighting it corrupts the lock.")
-    p.add_argument("--relock-margin", type=float, default=0.0,
+    p.add_argument("--relock-margin", type=float, default=0.1,
                    help="Re-lock to a better-matching demo when its weighted match beats the locked demo by this margin (recovery from a bad handoff lock).")
     p.add_argument("--subtask-patience", type=int, default=0,
                    help="If the current task stalls, defer it and re-route (0 disables).")
@@ -172,7 +172,12 @@ def main() -> None:
                    help="Override per-task thresholds calibrated into the learned completion checkpoint.")
     p.add_argument("--completion-debounce", type=int, default=2,
                    help="Consecutive learned-positive observations required before switching.")
-    p.add_argument("--max-episode-steps", type=int, default=280)
+    p.add_argument(
+        "--max-episode-steps",
+        type=int,
+        default=None,
+        help="Episode budget; default scales as 70 steps per requested task.",
+    )
     p.add_argument("--torch-seed", type=int, default=0)
     p.add_argument("--log-episodes", action="store_true")
     p.add_argument("--video-out", type=Path, default=None,
@@ -202,6 +207,7 @@ def main() -> None:
         raise ValueError(f"Missing specialist checkpoints for requested tasks {missing_specialists}")
     specialists = {name: specialist_by_name[name] for name in tasks}
     num_tasks = len(tasks)
+    episode_steps = int(args.max_episode_steps or 70 * num_tasks)
     if args.completion_mode == "learned" and args.completion_path is None:
         p.error("--completion-mode learned requires --completion-path")
     completion = (
@@ -220,7 +226,7 @@ def main() -> None:
     env = make_env(
         task.env_id,
         seed=args.seed,
-        max_episode_steps=args.max_episode_steps,
+        max_episode_steps=episode_steps,
         render_mode="rgb_array" if render else None,
         width=args.width if render else None,
         height=args.height if render else None,
@@ -415,6 +421,7 @@ def main() -> None:
         "completion_path": None if args.completion_path is None else str(args.completion_path),
         "completion_threshold": args.completion_threshold,
         "completion_debounce": int(args.completion_debounce),
+        "max_episode_steps": episode_steps,
     }
     print(json.dumps(row, default=str), flush=True)
     if args.out is not None:

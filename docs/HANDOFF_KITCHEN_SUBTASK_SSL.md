@@ -22,8 +22,10 @@ The original greedy scheduler (`--scheduler greedy`) scores only 0.25-0.40
 because it ignores downstream handoffs. The newer `--scheduler graph` learns
 directed terminal-to-start arm-pose costs from specialist demos and recovers the
 viable microwave→kettle→light→slide route even when the requested list is
-scrambled. With the all-task learned completion probe that reordered check
-scores 0.87/100.
+scrambled. With the all-task learned completion probe and live demo re-locking
+(`--relock-margin 0.1`), that reordered check scores **0.80/100** across four
+fresh seed blocks (0.88/0.76/0.80/0.76). The former 0.87 single-seed block was
+optimistic; without re-locking the fresh four-seed mean was 0.62.
 
 ## Controller (canonical)
 

@@ -442,7 +442,7 @@ upgrades to the walker.
 
 - **Goal-delta emphasis (law 3, locomotion analog).** Duplicate the
   **(desired_goal - achieved_goal) xy vector** N x in the flow conditioning
-  (`train_flow_walker.py --emphasis-repeat`, applied in `eval_hjepa_maze.py`
+  (`train/train_flow_walker.py --emphasis-repeat`, applied in the retired `eval_hjepa_maze.py`
   `LowLevelFlow`) -- the servo DIRECTION, analogous to the palm-ball vector, so
   the sampled gait chunk heads at the live subgoal instead of averaging over
   unrelated future-goal
@@ -490,7 +490,7 @@ upgrades to the walker.
 HWM neural high level (arXiv:2604.03208, "Hierarchical Planning with Latent
 World Models"), 2026-07-10:
 
-- Trained the repo's HWM stack (`train_hjepa_hwm.py`: HighEncoder psi +
+- Trained the repo's HWM stack (`train/train_hjepa_hwm.py`: HighEncoder psi +
   MacroEncoder GRU + residual MacroPredictor g with VICReg/stop-grad +
   SubgoalDecoder) on the Medium demos at stride 40. It fits the paper's claim of
   generalizing macro-dynamics -- **holdout next-macro-latent error ~0.0018**,
@@ -498,7 +498,7 @@ World Models"), 2026-07-10:
 - Ran it as the paper prescribes: **CEM over K macro-actions rolled through g,
   scored by decoded terminal position vs goal**, first macro decoded to an xy
   subgoal, on top of the (unchanged) directed flow walker, with reach-based
-  replanning (`eval_hjepa_hwm.py --low-type flow`, K in 1/2/4, reach-radius 1.0,
+  replanning (`eval/eval_hjepa_hwm.py --low-type flow`, K in 1/2/4, reach-radius 1.0,
   low-timeout 90).
 - **Result: 0.00-0.067/15 on Medium -- WORSE than the empirical Dijkstra graph
   (0.26).** Failure mode is exactly the documented one: the decoded-position CEM
@@ -513,8 +513,8 @@ World Models"), 2026-07-10:
 
 **Flow macro-action prior (the decisive fix), 2026-07-10:** replace the
 Gaussian-CEM macro sampler with a **rectified-flow prior over macro-actions**
-conditioned on `(z_high, goal_xy)` (`train_hwm_macro_flow.py`;
-`eval_hjepa_hwm.py --macro-flow`). Trained on the frozen HWM's
+conditioned on `(z_high, goal_xy)` (`train/train_hwm_macro_flow.py`;
+`eval/eval_hjepa_hwm.py --macro-flow`). Trained on the frozen HWM's
 `(psi(z_t), achieved_goal_{t+k*N}, macro_encoder(a_{t:t+N}))` tuples, so every
 sampled macro is an ON-MANIFOLD demonstrated transition. Plan = sample N macros
 from the flow, roll each through the frozen g, decode the next subgoal, pick the
@@ -537,78 +537,45 @@ never propose wall-crossing subgoals -- the exact failure Gaussian CEM had.
   walker, replacing the Dijkstra graph:** UMaze 0.867/60, Medium 0.39/80,
   Large 0.18/60. Per-maze checkpoints `antmaze_{umaze,medium,large}_hwm_s40.pt`
   (psi/macro/g/dec) + `..._hwm_macroflow.pt` (macro flow) +
-  `..._flow_directed.pt` (walker); eval `eval_hjepa_hwm.py --low-type flow
+  `..._flow_directed.pt` (walker); eval `eval/eval_hjepa_hwm.py --low-type flow
   --macro-flow ... --macro-flow-horizon 1 --reach-radius 1.0 --low-timeout 90`.
   Remaining gap to the historical ~0.77 Medium result is still the walker's gait speed on
   far-goal episodes.
 
-Session 2026-07-11 (flip diagnosis + self-trial recovery; Medium 0.39 -> 0.60,
-Large 0.18 -> 0.333):
+Session 2026-07-11 (flip diagnosis):
 
-- **Speed-extraction levers all NEGATIVE, and the reason rewrites the
-  diagnosis.** The demos are bimodal (60% of 8-step windows move < 0.2 xy, the
-  moving mode reaches 1.09/1.24/1.49 at p90/p95/p99), so "extract the fast mode"
-  looked plausible: (a) best-of-16 chunks ranked by a progress scorer
-  (`train_walker_scorer.py`, holdout MAE 0.049) — argmax 0.163/80 vs baseline
-  0.39; quantile 0.75/0.5 on seed 30000: 0.25/0.35 vs 0.55 baseline (monotone:
-  more selection pressure = worse); (b) progress-conditioned flow walker
-  (`train_flow_walker.py --progress-cond`, request p90=1.22) — 0.10 on seed
-  30000 with 63% of steps flipped.
-- **Root cause via `eval_hjepa_hwm.py --walk-diagnostics`: the ant spends
-  ~38-57% of eval steps FLIPPED** (torso body-z·world-z < 0); every failure is a
-  1000-step timeout stranded ~11-17 from goal; per-seed success is nearly
-  monotone in flip fraction (self-trial seeds: flip 0.24 -> 0.65 success, 0.57
-  -> 0.10). Demos never flip, so a flipped walker is off-manifold and cannot
-  self-right (natural recovery rate ~1.2% per 8-step window; OU flailing is
-  even worse: 33 recoveries in 88k flipped steps). Speed levers fail because
-  faster gaits flip more, and one flip costs the rest of the episode.
-- **Flip-risk chunk veto (train_flip_risk_scorer.py): NEGATIVE/neutral.**
-  S(cond, chunk) -> min uprightness (holdout MAE 0.019, i.e., near-perfectly
-  predictable) — but vetoing risky chunks did not cut realized flips
-  (0.30-0.35/20 on probe seeds): flip outcome is determined by the state before
-  the chunk choice, so selection arrives too late.
-- **Self-trial flip-recovery flow (the decisive fix,
-  `train_recovery_walker.py`): mine chunks that start tipped (uprightness <
-  0.5) and raise it >= 0.15 from the controller's OWN rollouts**
-  (`--rollout-out` self-trials + `collect_recovery_trials.py` OU-during-flip
-  trials; 3,518 chunks from 300 episodes), fit a goal-free rectified flow on
-  (JEPA latent | raw obs), and switch the low level to it while uprightness <
-  0.5 (exit 0.7, `--walker-recovery`). Plus **replan-2** (`--walker-replan 2`,
-  execute 2 of 8 chunk steps; alone: 0.50 vs 0.45-0.55 baseline, neutral).
-  Probe seeds 30000/54000: recovery v2 + replan-2 = 0.60/0.55 (baseline
-  0.45-0.55/0.10).
-- **With recovery installed, progress conditioning INVERTS from harmful to
-  helpful** (the flip tax is now bounded): progcond target 0.8 + recovery v2 +
-  replan-2 on seed 30000 = 0.75 (flip 0.215, stall 0.251, speed8 0.555 vs
-  baseline 0.34). **Full protocol Medium: 0.60/80 (0.70/0.60/0.50/0.60, seeds
-  30000-33000)** vs canonical 0.39/80. Checkpoints:
-  `antmaze_medium_flow_progcond.pt`, `antmaze_medium_recovery_flow_v2.pt`.
-- **Large: recovery + replan-2 = 0.333/60 (0.40/0.20/0.40, seeds 30000-32000)**
-  vs 0.18/60; progcond added nothing on Large (0.35/0.25/0.40) — recovery
-  quality, not speed, is the binding constraint there. Checkpoints:
-  `antmaze_large_recovery_flow.pt`, `antmaze_large_flow_progcond.pt`.
-- **Clean recovery demonstrations + distillation (the amplification):**
-  794 successful self-righting trajectories distilled into the recovery flow
-  (`antmaze_medium_recovery_flow_v3d.pt`; the same distill npz re-encoded per
-  maze gives `antmaze_{umaze,large}_recovery_flow_v3d.pt` — recovery is local
-  physics, it transfers across mazes). Probe seeds 30000/54000 with progcond
-  0.8 + replan-2: **0.90/0.90** (flip 0.035/0.106, speed8 0.66). Pooling
-  natural/OU chunks with the distilled skill was WORSE (0.60/0.65) — never blur
-  the expert manifold, including for recovery.
-- **Final canonical config + protocol numbers:** HWM flow-macro (n=16, horizon
-  1) + progcond walker `--walker-target-progress 1.0` + `--walker-recovery
-  ..._recovery_flow_v3d.pt` + `--walker-replan 2` + `--reach-radius 1.0
-  --low-timeout 60`: **Medium 0.7375/80** (0.75/0.85/0.75/0.60, seeds
-  30000-33000; tp sweep at lt90: 0.8 -> 0.6875, 1.0 -> 0.6875, 1.22 -> worse;
-  lt60 > lt90; macro-samples 32 neutral). **Large 0.483/60** (0.50/0.40/0.55,
-  seeds 30000-32000; with the weak pooled recovery it was 0.333-0.367).
-  The runtime controller remains fully self-supervised; the recovery bank is
-  treated as demonstration evidence for the short self-righting skill.
-- **UMaze with the same recipe (directed walker, no progcond needed):
-  0.95/60** (1.00/0.90/0.95, seeds 30000-32000) — up from 0.867/60 and past the
-  historical H-JEPA+BC ~0.93. The Medium distill npz re-encoded with the UMaze
-  JEPA (`antmaze_umaze_recovery_flow_v3d.pt`) transferred without any
-  UMaze-specific recovery data.
+- Speed extraction was not the limiting issue. Diagnostics showed that falling
+  converted otherwise fast gait episodes into 1000-step timeouts. A temporary
+  threshold-switched self-righting specialist established that clean
+  self-righting demonstrations were the missing evidence, raising Medium from
+  0.39 to 0.7375 and Large from 0.18 to 0.483. That mechanism was useful
+  diagnostically but too hand-authored for the final architecture.
+
+Session 2026-07-23 (unified behavior flow; specialist retired):
+
+- **Architecture.** One conditional residual rectified flow now covers directed
+  gait and self-righting chunks. Four FiLM-modulated residual blocks inject the
+  frozen JEPA/state/goal condition throughout the velocity field. The 794 clean
+  self-righting trajectories are mixed as ordinary auxiliary behavior; every
+  chunk receives multiple random navigation-goal relabels, teaching that its
+  applicability follows from state rather than the requested route.
+- **No runtime recovery mechanism.** There is no torso predicate, hysteresis,
+  recovery state, risk veto, second flow, or specialist switch. The temporary
+  trainers and their trial/checkpoint artifacts were deleted.
+- **Evaluation reproducibility fix.** `eval/eval_hjepa_hwm.py` now seeds NumPy,
+  PyTorch, CUDA flow sampling, and environment resets from the reported seed.
+  Seed labels therefore determine the whole stochastic controller.
+- **Selected configuration.** HWM flow macro-prior (`n=16`, horizon 1), unified
+  walker, replan 2, reach radius 1.0, low timeout 60. Medium/Large request
+  demonstrated progress 0.8. Large received one extra 40k-update continuation
+  with a 0.40 auxiliary fraction; it was retained only after the full sweep.
+- **Final checked results:** **UMaze 1.00/60** (1.00/1.00/1.00), **Medium
+  0.775/80** (0.75/0.75/0.80/0.80), and **Large 0.533/60**
+  (0.55/0.45/0.60). The old specialist results were 0.95, 0.7375, and 0.483,
+  respectively. Medium's seed-block range shrank from 0.25 to 0.05.
+- Canonical artifacts are
+  `runs/antmaze_{umaze,medium,large}/checkpoints/antmaze_*_flow_unified.pt`;
+  raw multi-seed JSONL is under each task's `eval_results/`.
 
 ## FrankaKitchen
 
@@ -750,10 +717,15 @@ minimum-cost route over the requested task subset.
 
 - When supplied the canonical four specialists in deliberately scrambled order
   (`slide, light, microwave, kettle`), the graph recovers
-  `microwave -> kettle -> light -> slide` from demonstration geometry. With the
-  seven-head learned completion probe it scores **0.87/100 full-4, 3.77/4
-  mean**. This is a task-list reordering check; it does not claim every physical
-  permutation is executable.
+  `microwave -> kettle -> light -> slide` from demonstration geometry. The
+  initial single-seed result was 0.87/100, but fresh blocks without re-locking
+  were only 0.60/0.52/0.64/0.72 (0.62 mean): the light specialist often locked
+  onto the wrong approach trajectory after the kettle handoff.
+- **Live demo re-locking is the robust fix.** With `--relock-margin 0.1`, a
+  specialist changes demonstrations only when a different trajectory matches
+  the current handoff state materially better. Four fresh 25-episode blocks
+  score **0.88/0.76/0.80/0.76 = 0.80/100**, 3.60/4 mean. Smaller margins and
+  stall-rotation, greedy, and fixed-order controls were worse.
 - Label replay, specialist training, completion detection, environment setup,
   metrics, and scheduling now accept a dynamic task vocabulary. Replaying the
   partial dataset against all environment predicates provides substantial
@@ -771,6 +743,14 @@ minimum-cost route over the requested task subset.
 This is a genuine generalization of task count and ordering machinery, but the
 honest scientific status is “all seven supported, seven-task chain open,” not
 “all seven solved.”
+
+Fresh seed audit (2026-07-23): the evaluator now scales its default episode
+budget as 70 steps per requested task (280 for four, 490 for seven), removing a
+hidden four-task constant. Live re-locking plus the longer budget still scores
+only **0.05/0.00/0.00 over three 20-episode blocks = 0.017/60**, with
+4.35/3.95/4.35 tasks completed (4.22/7 mean). The previous 0.05/20 block was
+not evidence of stable full-seven success; more time alone does not fix the
+late-chain/hinge skill gap.
 
 ## FetchSlide
 

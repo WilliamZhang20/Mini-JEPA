@@ -1,9 +1,0 @@
-=== point_medium (job 1455903) ===
-{"event": "graph", "landmarks": 90, "edges": 964}
-{"task": "point_medium", "policy": "FLAT (low-level -> goal)", "episodes": 30, "success_rate": 0.2000}
-{"task": "point_medium", "policy": "H-JEPA (subgoal graph)", "landmarks": 90, "episodes": 30, "success_rate": 0.2333}
-=== point_large (job 1455904) ===
-{"event": "graph", "landmarks": 130, "edges": 1196}
-{"task": "point_large", "policy": "FLAT (low-level -> goal)", "episodes": 30, "success_rate": 0.7000}
-{"task": "point_large", "policy": "H-JEPA (subgoal graph)", "landmarks": 130, "episodes": 30, "success_rate": 1.0000}
-HJEPA_ALL_DONE

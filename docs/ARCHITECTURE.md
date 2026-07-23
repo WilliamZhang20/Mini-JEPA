@@ -67,8 +67,8 @@ prevents further growth of the flat directory while preserving old commands.
 
 Retired (2026-07-10): the Dijkstra subgoal-graph maze controller
 (`eval_hjepa_maze.py`, `eval_hjepa2.py`, `record_hjepa_maze.py`) — replaced on
-every maze by the neural HWM flow-macro high level (`eval_hjepa_hwm.py` +
-`train_hwm_macro_flow.py`) over the directed flow walker; the Relocate
+every maze by the neural HWM flow-macro high level (`eval/eval_hjepa_hwm.py` +
+`train/train_hwm_macro_flow.py`) over the directed flow walker; the Relocate
 contact-scoring experiments (`contact.py`, `train_relocate_contact_*.py`,
 `*flow_residual_refiner.py`) — all measured neutral/negative, not part of the
 canonical dual-specialist controller; and the failed Kitchen latent-dynamics /

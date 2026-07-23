@@ -40,6 +40,73 @@ class LatentMacroPredictor(nn.Module):
         return z + self.net(torch.cat([z, macro_action], dim=-1))
 
 
+class HighEncoder(nn.Module):
+    """Compress a frozen low-level JEPA latent into an abstract HWM state."""
+
+    def __init__(self, low_dim: int, abstract_dim: int, hidden: int = 256) -> None:
+        super().__init__()
+        self.net = MLP([low_dim, hidden, hidden, abstract_dim], layer_norm=True)
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        return self.net(latent)
+
+
+class MacroEncoder(MacroActionEncoder):
+    """Compatibility name for the abstract HWM macro-action encoder."""
+
+
+class MacroPredictor(nn.Module):
+    """Residual dynamics in the abstract high-level latent."""
+
+    def __init__(self, abstract_dim: int, macro_dim: int, hidden: int = 256) -> None:
+        super().__init__()
+        self.net = MLP([abstract_dim + macro_dim, hidden, hidden, abstract_dim], layer_norm=True)
+
+    def forward(self, latent: torch.Tensor, macro: torch.Tensor) -> torch.Tensor:
+        return latent + self.net(torch.cat([latent, macro], dim=-1))
+
+
+class SubgoalDecoder(nn.Module):
+    """Decode an abstract HWM latent into achieved-goal coordinates."""
+
+    def __init__(self, abstract_dim: int, goal_dim: int, hidden: int = 128) -> None:
+        super().__init__()
+        self.net = MLP([abstract_dim, hidden, hidden, goal_dim], layer_norm=True)
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        return self.net(latent)
+
+
+def build_macro_data(episodes, spec, normalizer, world_model, device, stride, overlap=2):
+    """Encode primitive trajectory windows into frozen low-level macro data."""
+    goal_start, goal_end = spec.obs_dim, spec.obs_dim + spec.goal_dim
+    states, futures, chunks, positions = [], [], [], []
+    step = max(1, stride // overlap)
+    for episode in episodes:
+        for t in range(0, len(episode.actions) - stride, step):
+            states.append(episode.states[t])
+            futures.append(episode.states[t + stride])
+            chunks.append(episode.actions[t : t + stride])
+            positions.append(episode.states[t, goal_start:goal_end])
+    states = normalizer.encode(np.asarray(states, np.float32))
+    futures = normalizer.encode(np.asarray(futures, np.float32))
+    with torch.no_grad():
+        z = torch.cat([
+            world_model.encode(torch.from_numpy(states[i : i + 16384]).to(device))
+            for i in range(0, len(states), 16384)
+        ])
+        z_future = torch.cat([
+            world_model.encode(torch.from_numpy(futures[i : i + 16384]).to(device))
+            for i in range(0, len(futures), 16384)
+        ])
+    return (
+        z,
+        z_future,
+        torch.from_numpy(np.asarray(chunks, np.float32)).to(device),
+        torch.from_numpy(np.asarray(positions, np.float32)).to(device),
+    )
+
+
 def sample_macro_dataset(episodes, stride: int, overlap: int = 2):
     step = max(1, stride // max(1, overlap))
     states, futures, chunks, starts, finals = [], [], [], [], []

@@ -1,4 +1,4 @@
-"""Evaluate the proper Hierarchical-JEPA HWM: CEM planning over macro-actions in
+"""Evaluate the Hierarchical-JEPA HWM: planning over macro-actions in
 the abstract latent (one level up; NOT Dijkstra), strictly on top of the frozen
 low level. Also runs the three experiments that matter:
 
@@ -32,7 +32,7 @@ from jepa_robotics.envs import flatten_obs, make_env, obs_spec_from_env
 from jepa_robotics.models import normalized_mse
 from jepa_robotics.tasks import resolve_task
 from jepa_robotics.algos.maze_low_level import LowLevelBC, LowLevelFlow
-from scripts.train_hjepa_hwm import HighEncoder, MacroEncoder, MacroPredictor, SubgoalDecoder, build_macro_data
+from jepa_robotics.algos.hwm import HighEncoder, MacroEncoder, MacroPredictor, SubgoalDecoder, build_macro_data
 from jepa_robotics.algos.priors import EpsNet, make_ddpm, sample_action_chunks
 
 
@@ -224,12 +224,7 @@ def main() -> None:
     p.add_argument("--walker-replan", type=int, default=None,
                    help="Execute only this many steps of each sampled chunk before resampling (default: the full chunk). Tighter closed loop = less open-loop commitment to destabilizing sequences.")
     p.add_argument("--rollout-out", type=Path, default=None,
-                   help="Save the eval rollouts (states/actions npz, episode format) as self-trial data — e.g. for flip-risk/recovery training.")
-    p.add_argument("--walker-recovery", type=Path, default=None,
-                   help="Recovery flow checkpoint (train_recovery_walker.py); the walker switches to it while flipped.")
-    p.add_argument("--walker-risk-scorer", type=Path, default=None,
-                   help="Flip-risk scorer checkpoint (train_flip_risk_scorer.py) for the safe-chunk veto (needs --walker-samples > 1).")
-    p.add_argument("--walker-risk-threshold", type=float, default=0.5)
+                   help="Save eval rollouts (states/actions npz, episode format) for self-supervised analysis.")
     p.add_argument("--jepa-model", type=Path, required=True)
     p.add_argument("--episodes-npz", type=Path, default=None,
                    help="Episodes for the (optional) macro-model diagnostics; not needed for control.")
@@ -247,6 +242,14 @@ def main() -> None:
     p.add_argument("--device", default="cpu")
     args = p.parse_args()
 
+    # Make both environment starts and stochastic flow samples reproducible.
+    # Each reported seed therefore identifies the complete controller rollout,
+    # rather than only the environment's initial state.
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     task = resolve_task(args.task, None)
     dev = torch.device(args.device)
     psi, macro, g, dec, c = load_hwm(args.hwm, dev)
@@ -256,9 +259,8 @@ def main() -> None:
         low = LowLevelFlow(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high, device=args.device,
                            replan=args.walker_replan,
                            scorer_path=args.walker_scorer, n_samples=args.walker_samples,
-                           target_progress=args.walker_target_progress, select_quantile=args.walker_select_quantile,
-                           recovery_path=args.walker_recovery,
-                           risk_scorer_path=args.walker_risk_scorer, risk_threshold=args.walker_risk_threshold)
+                           target_progress=args.walker_target_progress,
+                           select_quantile=args.walker_select_quantile)
     else:
         low = LowLevelBC(args.jepa_model, args.bc_policy, env.action_space.low, env.action_space.high, device=args.device)
     env.close()

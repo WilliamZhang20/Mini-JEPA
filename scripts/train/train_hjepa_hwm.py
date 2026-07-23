@@ -1,4 +1,4 @@
-"""Proper Hierarchical-JEPA high level (HWM), trained strictly ON TOP of the
+"""Train the Hierarchical-JEPA high level (HWM) on top of the
 frozen low-level JEPA, per the two-tier world-model recipe:
 
   * psi  (HighEncoder)   : MLP that compresses the frozen low latent z_t (192) ->
@@ -34,67 +34,9 @@ os.environ.setdefault("MINARI_DATASETS_PATH", "/u5/w223zhan/jepa-mini/.cache/min
 from jepa_robotics.data import load_episodes_npz
 from jepa_robotics.envs import make_env, obs_spec_from_env
 from jepa_robotics.evaluate import load_jepa_artifact
-from jepa_robotics.models import MLP, covariance_regularizer, normalized_mse, variance_regularizer
+from jepa_robotics.algos.hwm import HighEncoder, MacroEncoder, MacroPredictor, SubgoalDecoder, build_macro_data
+from jepa_robotics.models import covariance_regularizer, normalized_mse, variance_regularizer
 from jepa_robotics.tasks import resolve_task
-
-
-class HighEncoder(nn.Module):
-    def __init__(self, low_dim, abstract_dim, hidden=256):
-        super().__init__()
-        self.net = MLP([low_dim, hidden, hidden, abstract_dim], layer_norm=True)
-
-    def forward(self, z):
-        return self.net(z)
-
-
-class MacroEncoder(nn.Module):
-    def __init__(self, action_dim, macro_dim, hidden=128):
-        super().__init__()
-        self.gru = nn.GRU(action_dim, hidden, batch_first=True)
-        self.head = nn.Linear(hidden, macro_dim)
-
-    def forward(self, chunk):  # chunk: [B, N, action_dim]
-        _, h = self.gru(chunk)
-        return self.head(h[-1])
-
-
-class MacroPredictor(nn.Module):
-    def __init__(self, abstract_dim, macro_dim, hidden=256):
-        super().__init__()
-        self.net = MLP([abstract_dim + macro_dim, hidden, hidden, abstract_dim], layer_norm=True)
-
-    def forward(self, z_high, m):
-        return z_high + self.net(torch.cat([z_high, m], dim=-1))  # residual macro-step
-
-
-class SubgoalDecoder(nn.Module):
-    def __init__(self, abstract_dim, goal_dim, hidden=128):
-        super().__init__()
-        self.net = MLP([abstract_dim, hidden, hidden, goal_dim], layer_norm=True)
-
-    def forward(self, z_high):
-        return self.net(z_high)
-
-
-def build_macro_data(episodes, spec, normalizer, wm, dev, stride, overlap=2):
-    """Subsample trajectories at the macro stride: returns frozen low latents at
-    t and t+N, the N-step action chunk, and the achieved_goal position at t."""
-    gs, ge = spec.obs_dim, spec.obs_dim + spec.goal_dim
-    St, S2t, Ch, Pos = [], [], [], []
-    step = max(1, stride // overlap)
-    for ep in episodes:
-        T = len(ep.actions)
-        for t in range(0, T - stride, step):
-            St.append(ep.states[t]); S2t.append(ep.states[t + stride])
-            Ch.append(ep.actions[t:t + stride]); Pos.append(ep.states[t, gs:ge])
-    St = normalizer.encode(np.asarray(St, np.float32))
-    S2t = normalizer.encode(np.asarray(S2t, np.float32))
-    with torch.no_grad():
-        Z = torch.cat([wm.encode(torch.from_numpy(St[i:i + 16384]).to(dev)) for i in range(0, len(St), 16384)], 0)
-        Z2 = torch.cat([wm.encode(torch.from_numpy(S2t[i:i + 16384]).to(dev)) for i in range(0, len(S2t), 16384)], 0)
-    Ch = torch.from_numpy(np.asarray(Ch, np.float32)).to(dev)
-    Pos = torch.from_numpy(np.asarray(Pos, np.float32)).to(dev)
-    return Z, Z2, Ch, Pos
 
 
 def main() -> None:

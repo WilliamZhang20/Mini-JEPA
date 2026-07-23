@@ -33,14 +33,14 @@ not a restriction on the source of observed behavior.
 | FetchPickAndPlace | SSL replacement solved | inverse prior + JEPA chunk selection, 1.00 |
 | FetchSlide | Solved | goal-frame equivariant ballistic JEPA HWM, 0.848 + 0.857 over independent 1000-episode blocks (0.853/2000) |
 | PointMaze UMaze/Medium/Large | SSL replacement solved (Dijkstra retired) | HWM flow-macro-prior high level + directed flow walker, 1.00/1.00/1.00 (matches the legacy graph+inverse; no Dijkstra) |
-| AntMaze UMaze | SSL replacement solved | HWM flow-macro + directed walker + demonstration-distilled recovery flow + replan-2 + low-timeout 60, 0.95/60 (1.00/0.90/0.95) |
-| AntMaze Medium | Improved | HWM flow-macro + progress-conditioned walker + demonstration-distilled recovery flow + replan-2 + low-timeout 60, 0.7375/80 |
-| AntMaze Large | Improved | same recipe as Medium, 0.483/60 |
+| AntMaze UMaze | SSL replacement solved | HWM flow-macro + unified condition-modulated walker, 1.00/60 (1.00/1.00/1.00) |
+| AntMaze Medium | Improved | same unified walker, progress condition 0.8, 0.775/80 (0.75/0.75/0.80/0.80) |
+| AntMaze Large | Improved | unified walker with additional auxiliary-behavior mixing, 0.533/60 (0.55/0.45/0.60) |
 | Adroit Door | SSL replacement solved | schedule-phase inverse, 1.00/30; old BC removed |
 | Adroit Hammer | SSL replacement solved | p4 schedule-phase inverse, 1.00/30 fresh validation; old BC removed |
 | Adroit Pen | SSL replacement solved | raw+latent future flow, 0.90/30; old BC removed |
 | Adroit Relocate | SSL replacement accepted | dual possession-specialist inverse (firm 0.045 switch) on demo-locked futures with palm-ball-emphasis reach + ball-target-emphasis held specialists, 0.957/210 held-out; former BC removed |
-| FrankaKitchen | Four-task SSL solved; reordered/all-task generalization in progress | demo-handoff graph + all-task completion probe: 0.87/100 on a scrambled four-task request; seven specialists cover all environment options, full-7 0.05/20 and 4.9/7 mean with env switching |
+| FrankaKitchen | Four-task SSL solved; reordered/all-task generalization in progress | demo-handoff graph + live demo re-locking + all-task completion probe: 0.80/100 on a scrambled four-task request across four fresh seeds; full-7 remains open |
 | HandManipulate Block/Egg (full) | Open, controller-bound | demo-free SSL; WM solved, but MPC/flow controllers ~0 on full-pose (see ledger) |
 | HandManipulateBlockRotateZ (stepping stone) | Open, ~0.05-0.10 demo-free SSL | geodesic-supervised DexterousJEPA (7.9° H=8) + future-conditioned flow; flow breaks the finger-gaiting regrasp ceiling (65° sustained rotation) but directed control caps ~30-40° closed; fine CEM converts a minority of episodes. Stronger models (DiT/CFG/rotation-weighted/self-goaling) did not crack directional chaining |
 
@@ -94,9 +94,9 @@ not a restriction on the source of observed behavior.
 - **AntMaze Medium/Large (improved 2026-07-10, reproducible):** two SSL
   upgrades give the first reproducible non-zero Medium in the current env.
   (1) A **directed-motion goal-delta-emphasis flow-matching walker**
-  (`train_flow_walker.py --directed --emphasis-repeat`) as the low level:
+  (`train/train_flow_walker.py --directed --emphasis-repeat`) as the low level:
   UMaze 0.85/60 (was 0.33). (2) A **HWM neural high level with a flow prior over
-  macro-actions** (arXiv:2604.03208 + `train_hwm_macro_flow.py`): sampling macros
+  macro-actions** (arXiv:2604.03208 + `train/train_hwm_macro_flow.py`): sampling macros
   from a flow conditioned on `(z_high, goal_xy)` keeps the macro search on the
   feasible demonstrated manifold, fixing the Gaussian-CEM wall-crossing
   hallucination. On Medium the high-level comparison (same directed walker) is
@@ -116,34 +116,18 @@ not a restriction on the source of observed behavior.
   Dijkstra graph** to the same flow-macro HWM + directed flow walker paradigm
   (U/M/L 1.00/1.00/1.00, matching the old graph+inverse), so no maze task uses
   Dijkstra anymore. See EXPERIMENT_LEDGER for recipes and A/Bs.
-- **AntMaze Medium/Large (improved again 2026-07-11, reproducible): the
-  "imitation-speed ceiling" was a misdiagnosis — the real bottleneck is the ant
-  FLIPPING onto its back.** New `--walk-diagnostics` showed the canonical
-  controller spends ~38-57% of eval steps with the torso inverted (demos contain
-  zero flipped states, so a flipped walker is off-manifold and flails until the
-  1000-step timeout); per-seed success is nearly monotone in flip fraction, and
-  every speed lever (best-of-N argmax/quantile chunk selection, progress
-  conditioning alone) made success WORSE because faster gaits flip more. Fix =
-  **self-trial flip-recovery flow** (`train_recovery_walker.py`, mined from the
-  controller's own rollouts + OU-during-flip trials via
-  `collect_recovery_trials.py`; `--walker-recovery` switches the low level to it
-  while uprightness < 0.5) + **replan-2** (tighter closed loop) — and with
-  recovery in place the progress-conditioned walker (target 0.8) flips from
-  harmful to helpful. **Medium 0.60/80 (0.70/0.60/0.50/0.60, seeds 30000-33000,
-  was 0.39/80); Large 0.333/60 (0.40/0.20/0.40, seeds 30000-32000, was
-  0.18/60).** Flip-risk chunk veto was neutral-to-negative (flip outcome is
-  state-determined before chunk choice). **The decisive amplification was a
-  clean recovery-demonstration bank:** distilling 794 successful self-righting
-  trajectories into the SSL recovery flow
-  (`..._recovery_flow_v3d.pt`) collapsed eval flips to 0.03-0.11 and doubled
-  realized speed to ~0.66/8 steps.** Pooling the sloppy natural/OU recoveries
-  with the crisp distilled skill was WORSE (0.60-0.65 vs 0.90 probe) — the
-  "never blur the expert manifold" law applies to recovery too. Final canonical
-  config (both mazes): HWM flow-macro (n=16, horizon 1) + progress-conditioned
-  directed walker (`--walker-target-progress 1.0`) + distilled recovery
-  (`--walker-recovery`) + `--walker-replan 2` + `--low-timeout 60`:
-  **Medium 0.7375/80 (0.75/0.85/0.75/0.60, seeds 30000-33000), Large
-  0.483/60 (0.50/0.40/0.55, seeds 30000-32000)**.
+- **AntMaze unified low level (2026-07-23, reproducible):** the old solution
+  correctly identified falling as the locomotion bottleneck, but encoded that
+  knowledge as a torso-quaternion threshold and a separate self-righting
+  network. The replacement trains one FiLM-modulated residual flow over
+  directed gait chunks and 794 clean self-righting demonstrations. Each
+  auxiliary chunk is paired with multiple random navigation goals, so the
+  model learns from state when that behavior is useful rather than receiving a
+  runtime recovery flag. The old thresholds, specialist/risk networks, and
+  collection scripts are removed. Fully seeded flow and environment sweeps:
+  **UMaze 1.00/60 (1.00/1.00/1.00), Medium 0.775/80
+  (0.75/0.75/0.80/0.80), Large 0.533/60 (0.55/0.45/0.60)**. This improves both
+  the mean and seed-block spread over the specialist configuration.
 - **FrankaKitchen (SOLVED this session, reproducible):** the Relocate recipe
   ported directly to the sequential task closes it. Four **segment-pure
   per-subtask inverse specialists** (microwave/kettle/light switch/slide
@@ -180,11 +164,15 @@ not a restriction on the source of observed behavior.
   A second follow-up generalizes the high level rather than pretending physical
   task order is arbitrary. Directed handoff costs are learned from specialist
   demo terminal/start arm poses, and a dynamic program routes through any
-  requested subset. A scrambled four-task request reaches **0.87/100** with the
-  all-task learned completion probe. The entire pipeline now accepts all seven
-  environment tasks; seven-task validation reaches **0.05/20 full-7, 4.9/7
-  mean** with environment switching. Hinge cabinet is the remaining dominant
-  low-level failure, so full-seven is supported but open.
+  requested subset. A scrambled four-task request reaches **0.80/100** across
+  four fresh seed blocks (0.88/0.76/0.80/0.76) with the all-task learned
+  completion probe. Live demo re-locking with a 0.10 margin fixes the weak
+  handoff tail; without it, fresh seeds averaged 0.62 and the former 0.87
+  single-seed block was optimistic. The entire pipeline now accepts all seven
+  environment tasks. A fresh three-seed full-seven validation uses a dynamic
+  490-step budget and reaches **0.017/60 full-7, 4.22/7 mean**
+  (0.05/0.00/0.00). Hinge cabinet is the remaining dominant low-level failure,
+  so full-seven is supported but open.
 
 ## Canonical Docs
 
