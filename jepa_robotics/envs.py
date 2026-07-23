@@ -37,6 +37,7 @@ def make_env(
     width: int | None = None,
     height: int | None = None,
     canonical_task: str | None = None,
+    kitchen_tasks: list[str] | tuple[str, ...] | None = None,
 ):
     import gymnasium as gym
 
@@ -54,7 +55,7 @@ def make_env(
         kwargs["height"] = height
     # PointMaze/AntMaze default to a *continuing* task (the goal resamples after
     # every reach and the episode never terminates), which is wrong for our
-    # goal-reaching HER setup. Force one fixed goal per episode that terminates
+    # goal-reaching setup. Force one fixed goal per episode that terminates
     # on success, matching the Fetch goal envs.
     if "PointMaze" in env_id or "AntMaze" in env_id:
         kwargs.setdefault("continuing_task", False)
@@ -65,11 +66,14 @@ def make_env(
         # Standard D4RL kitchen target set = the 4 tasks the complete-v2 demos
         # actually finish (microwave/kettle/light switch/slide cabinet); NOT bottom
         # burner (no demo completes it), which made full-4 near-impossible.
-        kwargs.setdefault("tasks_to_complete",
-                          ["microwave", "kettle", "light switch", "slide cabinet"])
+        kwargs.setdefault(
+            "tasks_to_complete",
+            list(kitchen_tasks) if kitchen_tasks is not None else
+            ["microwave", "kettle", "light switch", "slide cabinet"],
+        )
     env = gym.make(env_id, **kwargs)
     # Maze and Adroit envs report ``info["success"]``; the rest of the pipeline
-    # (HER EvalCallback, eval scripts) reads ``info["is_success"]``. Alias it.
+    # Evaluation code reads ``info["is_success"]``. Alias it.
     # Harmless elsewhere (only added when ``success`` is present and
     # ``is_success`` is not), so it is safe to apply broadly.
     if "Maze" in env_id or "Adroit" in env_id:

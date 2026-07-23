@@ -18,41 +18,8 @@ from jepa_robotics.data import load_episodes_npz
 from jepa_robotics.envs import flatten_obs, make_env
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
-from jepa_robotics.algos.futures import DemoLockedFutureIndex
-from jepa_robotics.algos.priors import InversePrior
-
-
-def _append_emphasis(parts: list, s: torch.Tensor, ckpt: dict) -> None:
-    """Append the emphasis suffix (duplicated raw current-state dims) that a
-    specialist was trained with, so the eval conditioning matches training.
-    A checkpoint without emphasis config is a no-op, keeping legacy inverses
-    unchanged."""
-    dims = ckpt.get("emphasis_dims")
-    repeat = int(ckpt.get("emphasis_repeat", 0) or 0)
-    if dims and repeat > 0:
-        lo, hi = (int(x) for x in dims.split(","))
-        parts.append(s[:, lo:hi].repeat(1, repeat))
-
-
-class NearestFutureIndex:
-    def __init__(self, states: np.ndarray, futures: np.ndarray, normalizer) -> None:
-        self.states = states.astype(np.float32)
-        self.futures = futures.astype(np.float32)
-        self.norm_states = normalizer.encode(self.states)
-        try:
-            from scipy.spatial import cKDTree
-
-            self.tree = cKDTree(self.norm_states)
-        except Exception:
-            self.tree = None
-
-    def query(self, state: np.ndarray, normalizer) -> np.ndarray:
-        x = normalizer.encode(state).astype(np.float32)
-        if self.tree is not None:
-            _dist, idx = self.tree.query(x, k=1)
-            return self.futures[int(idx)]
-        d = np.linalg.norm(self.norm_states - x[None], axis=1)
-        return self.futures[int(np.argmin(d))]
+from jepa_robotics.algos.futures import DemoLockedFutureIndex, NearestFutureIndex
+from jepa_robotics.algos.priors import InversePrior, append_emphasis
 
 
 class FlatInversePolicy:
@@ -147,7 +114,7 @@ class FlatInversePolicy:
         parts = [z, z_goal, h_token]
         if bool(ckpt.get("concat_raw", False)):
             parts.extend([s, tgt])
-        _append_emphasis(parts, s, ckpt)
+        append_emphasis(parts, s, ckpt)
         cond = torch.cat(parts, dim=-1)
         base = prior(cond).view(1, int(ckpt["H"]), int(ckpt["action_dim"])) * self.action_scale
         if self.candidates > 1 and self.noise_std > 0:

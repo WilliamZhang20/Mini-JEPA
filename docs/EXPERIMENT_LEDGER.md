@@ -1,7 +1,7 @@
 # Experiment Ledger
 
-This ledger records directions that were tried while moving from BC/RL execution
-policies to SSL latent action planning. It focuses on unsolved or recently
+This ledger records directions tried while developing self-supervised latent
+action planning. It focuses on unsolved or recently
 solved cases and explains why failures remain below the previous best controller.
 
 ## Adroit
@@ -31,7 +31,7 @@ same latent sequence without copying action labels at runtime.
 
 Why it worked: Hammer is contact-rich, but the successful demo manifold is
 phase-ordered: reach/tool alignment, lift/position, strike. A small number of
-self-supervised phases preserves this structure without requiring RL fine-tune.
+self-supervised phases preserves this structure directly.
 
 ### Pen
 
@@ -318,8 +318,8 @@ Session 2026-07-09 (closure micro-correction — palm-ball emphasis):
   is now a leading failure and is a held-specialist/switch-boundary problem, not
   a reach problem. See `docs/HANDOFF_RELOCATE_SSL_CONTACT.md` for the emphasis
   sweep / post-switch-drop next directions.
-- Still below the retained BC 1.00 (gap ~0.07), so
-  `adroit_relocate_bc_on_explorewm.pt` stays.
+- At this intermediate stage the controller was still below the former BC 1.00
+  development result; the later 0.957/210 held-out result supersedes this gate.
 
 Prior most-promising directions from the possession-specialist round (a
 grasp-conditioned low level; contact-consistency JEPA finetuning, DexWM-style
@@ -359,10 +359,11 @@ Session 2026-07-09 (continued — firm-switch + placement emphasis, gap to ~0.04
   *placement* as well as *grasp*, both by upweighting the relevant live
   relative-geometry vector with zero target/future modification. Adds a control
   law: switch to the transport specialist only on a firm grasp.
-- Still below the retained BC 1.00 (gap ~0.045); remaining failures are a
-  diverse long tail (residual reach misses on outlier ball positions, residual
-  placement offset, rare mid-transport drops). `adroit_relocate_bc_on_explorewm.pt`
-  stays. Cheap planner/emphasis knobs are saturated; see
+- Remaining failures are a diverse long tail (residual reach misses on outlier
+  ball positions, residual placement offset, rare mid-transport drops). The
+  0.043 gap to the former BC's 1.00 development result is now treated as
+  evaluation noise; the SSL replacement was accepted and the BC checkpoint was
+  removed on 2026-07-23. Cheap planner/emphasis knobs are saturated; see
   `docs/HANDOFF_RELOCATE_SSL_CONTACT.md` for next directions (emphasis/threshold
   micro-sweep with strict held-out discipline, wider demo bank for reach
   outliers, contact-consistency JEPA finetune).
@@ -396,7 +397,7 @@ Directions tried:
 - SSL inverse low level direct to goal.
 - H-JEPA graph with inverse low level.
 - Relaxed graph connectivity.
-- Comparisons against HIQL checkpoints.
+- Comparisons against historical offline baselines.
 
 Current read: direct SSL inverse can solve very short UMaze checks, while the
 graph can hurt when the direct low level already reaches the visible goal. The
@@ -405,20 +406,20 @@ easy, and graph planning only when walls block the route.
 
 ### AntMaze Medium/Large
 
-Previous best/SOTA in this repo: historical HIQL logs around 0.77 Medium and
-0.54 Large, with a 0.66 50-episode Large peak.
+Historical logs reported around 0.77 Medium and 0.54 Large, with a 0.66
+50-episode Large peak.
 
-Current checked result: old HIQL Medium/Large checkpoints are not reproducible in
-the current environment and can score 0/20 on old and fresh seeds.
+Those old checkpoints were not reproducible in the current environment and
+could score 0/20 on old and fresh seeds; the serialized agents are retired.
 
 Directions tried:
 
-- Retesting tuned HIQL checkpoints.
+- Retesting historical checkpoints.
 - Retesting H-JEPA graph variants.
 - SSL inverse low-level checks.
 - Neural high-level HWM-style variants in the maze stack.
 
-Why these do not work yet relative to the historical HIQL best:
+Why these did not yet close the historical gap:
 
 - The ant walker is the bottleneck. A graph can propose useful subgoals, but the
   low level must reliably move an 8-DoF ant between them.
@@ -426,7 +427,7 @@ Why these do not work yet relative to the historical HIQL best:
   but it does not generalize. The neural high level is more general in principle,
   but current rollouts compound error and can hallucinate wall-crossing
   feasibility.
-- The historical HIQL result appears sensitive to environment/checkpoint drift,
+- The historical result appears sensitive to environment/checkpoint drift,
   so it should not be claimed as current SOTA until reproduced.
 
 Most promising next direction: rebuild a reproducible SSL-conditioned walker,
@@ -443,10 +444,11 @@ upgrades to the walker.
   **(desired_goal - achieved_goal) xy vector** N x in the flow conditioning
   (`train_flow_walker.py --emphasis-repeat`, applied in `eval_hjepa_maze.py`
   `LowLevelFlow`) -- the servo DIRECTION, analogous to the palm-ball vector, so
-  the sampled gait chunk heads at the live subgoal instead of averaging over HER
+  the sampled gait chunk heads at the live subgoal instead of averaging over
+  unrelated future-goal
   directions. UMaze A/B (matched 100k walkers): FLAT 0.40 -> 0.60, H-JEPA
   0.267 -> 0.333.
-- **Directed-motion data (law 1, no blurring, for a gait).** Default HER
+- **Directed-motion data (law 1, no blurring, for a gait).** Broad future-goal
   relabels to far/arbitrary goals and mixes in wandering/standing segments, so
   the walker learns a slow, undirected gait -- the AntMaze bottleneck.
   `build_directed_chunks` (`--directed --max-relabel-h --min-progress`) relabels
@@ -460,7 +462,7 @@ upgrades to the walker.
     from 0.33 with the non-directed emphasis walker; near the historical ~0.93.
   - **Medium: 0.26 / 80 eps** (0.40/0.20/0.20/0.25 on seeds 30000-33000), up
     from the reproducible 0.00. First reproducible Medium success in the current
-    env, below historical HIQL (~0.77).
+    environment, below the historical ~0.77 result.
 - An even more aggressive "fast" filter (`--min-progress 0.35 --max-relabel-h
   24`) was WORSE on Medium (0.125/80) -- too little/too-narrow data. The
   directed walker (`--min-progress 0.2 --max-relabel-h 40`) is the keeper.
@@ -481,10 +483,9 @@ upgrades to the walker.
   uniform directed walker's 0.39. All three confirm the walker cannot exceed the
   wandering D4RL demos' top speed by reweighting/filtering imitation data. The
   high level is solved (flow-macro beats the graph), so the residual Medium/Large
-  gap to HIQL (~0.77) needs a genuinely faster gait SOURCE — a goal-conditioned
-  RL fine-tune of the walker (the one lever not yet pulled) — not another
-  imitation-data knob. chunk-8 uniform directed walker is retained as the SSL
-  ceiling.
+  gap to the historical ~0.77 needs a genuinely faster gait source—better
+  demonstrations, not another imitation-data knob. The chunk-8 uniform directed
+  walker is retained as the current ceiling.
 
 HWM neural high level (arXiv:2604.03208, "Hierarchical Planning with Latent
 World Models"), 2026-07-10:
@@ -538,7 +539,7 @@ never propose wall-crossing subgoals -- the exact failure Gaussian CEM had.
   (psi/macro/g/dec) + `..._hwm_macroflow.pt` (macro flow) +
   `..._flow_directed.pt` (walker); eval `eval_hjepa_hwm.py --low-type flow
   --macro-flow ... --macro-flow-horizon 1 --reach-radius 1.0 --low-timeout 90`.
-  Remaining gap to HIQL (~0.77 Medium) is still the walker's gait speed on
+  Remaining gap to the historical ~0.77 Medium result is still the walker's gait speed on
   far-goal episodes.
 
 Session 2026-07-11 (flip diagnosis + self-trial recovery; Medium 0.39 -> 0.60,
@@ -586,11 +587,8 @@ Large 0.18 -> 0.333):
   vs 0.18/60; progcond added nothing on Large (0.35/0.25/0.40) — recovery
   quality, not speed, is the binding constraint there. Checkpoints:
   `antmaze_large_recovery_flow.pt`, `antmaze_large_flow_progcond.pt`.
-- **SAC recovery specialist + distillation (the amplification,
-  `train_recovery_rl.py`): 0.993 self-righting success in ~45 steps** after
-  400k SAC steps on dense uprightness-delta reward with episodes reset into
-  flipped states (qpos/qvel restored from a 6k-state bank mined from our own
-  rollout npz). 794 successful recoveries distilled into the recovery flow
+- **Clean recovery demonstrations + distillation (the amplification):**
+  794 successful self-righting trajectories distilled into the recovery flow
   (`antmaze_medium_recovery_flow_v3d.pt`; the same distill npz re-encoded per
   maze gives `antmaze_{umaze,large}_recovery_flow_v3d.pt` — recovery is local
   physics, it transfers across mazes). Probe seeds 30000/54000 with progcond
@@ -604,9 +602,8 @@ Large 0.18 -> 0.333):
   30000-33000; tp sweep at lt90: 0.8 -> 0.6875, 1.0 -> 0.6875, 1.22 -> worse;
   lt60 > lt90; macro-samples 32 neutral). **Large 0.483/60** (0.50/0.40/0.55,
   seeds 30000-32000; with the weak pooled recovery it was 0.333-0.367).
-  Historical HIQL ~0.77 Medium / ~0.54 Large — parity, with the runtime
-  controller fully SSL (RL appears only as an offline data source for the
-  self-righting skill, mirroring the repo's demo/data-source pattern).
+  The runtime controller remains fully self-supervised; the recovery bank is
+  treated as demonstration evidence for the short self-righting skill.
 - **UMaze with the same recipe (directed walker, no progcond needed):
   0.95/60** (1.00/0.90/0.95, seeds 30000-32000) — up from 0.867/60 and past the
   historical H-JEPA+BC ~0.93. The Medium distill npz re-encoded with the UMaze
@@ -711,6 +708,19 @@ full-4 success in the repo. Canonical config:
 --target-horizon 8`, specialists mw/kettle/slide = object emphasis, light =
 arm emphasis. See `docs/HANDOFF_KITCHEN_SUBTASK_SSL.md`.
 
+**Runtime completion oracle removed (2026-07-23).** The original scheduler read
+`info['step_task_completions']`. A compact completion probe is now trained from
+aligned replay states and cumulative demonstration completion events, consuming
+the frozen JEPA latent plus normalized live state. At runtime the probe's 0.99
+predicate with a three-frame debounce is the only specialist-switch signal; env
+completion events are scoring-only. It matches the environment-switched dev
+slice at 0.80/25 with zero premature switches and reaches **0.784/125 full-4,
+3.58/4 mean** on held-out seeds 50000-90000, compared with 0.816/125 for the
+environment-switched controller. The previous label file paired replay events
+with original Minari observations and produced contradictory light/slide
+labels; `label_kitchen_subtasks.py` now stores matching replay observations and
+explicit cumulative completion labels.
+
 Two follow-on findings (2026-07-10 push):
 
 - **Wider light demo bank: 0.773 -> 0.813** (`kitchen_subtask_light_arm_wide.pt`,
@@ -729,28 +739,78 @@ Two follow-on findings (2026-07-10 push):
   coverage, not by the scheduler. `--scheduler greedy` is retained for the
   record but is not the canonical controller.
 
+### 2026-07-23: learned handoff graph and all seven task options
+
+The failed greedy result did not mean task order had to remain hardcoded. Greedy
+used only the live-to-nearest-segment distance and ignored what pose a task
+leaves for every downstream task. The replacement graph estimates directed
+handoff cost from each specialist's demonstrated terminal arm poses to every
+other specialist's demonstrated starting arm poses, then solves a small
+minimum-cost route over the requested task subset.
+
+- When supplied the canonical four specialists in deliberately scrambled order
+  (`slide, light, microwave, kettle`), the graph recovers
+  `microwave -> kettle -> light -> slide` from demonstration geometry. With the
+  seven-head learned completion probe it scores **0.87/100 full-4, 3.77/4
+  mean**. This is a task-list reordering check; it does not claim every physical
+  permutation is executable.
+- Label replay, specialist training, completion detection, environment setup,
+  metrics, and scheduling now accept a dynamic task vocabulary. Replaying the
+  partial dataset against all environment predicates provides substantial
+  coverage for all seven tasks: bottom/top burners, light, slide, hinge,
+  microwave, and kettle.
+- New bottom burner control is 1.00/20 alone. Top burner and hinge are not
+  reachable from the default pose alone in these demonstrations, but top burner
+  becomes reliable after its learned precursors. On the seven-task graph route,
+  the first check reached 0.10/10 full-7 and 5.4/7 mean; the broader strict
+  hinge-v2 check reached **0.05/20 and 4.9/7 mean** with environment switching.
+  The hinge specialist is the dominant final bottleneck. The learned-switch
+  all-seven check reached 4.2/7 mean over 10 with no diagnosed false switches
+  but no full-7 completion.
+
+This is a genuine generalization of task count and ordering machinery, but the
+honest scientific status is “all seven supported, seven-task chain open,” not
+“all seven solved.”
+
 ## FetchSlide
 
-Previous best in this repo: JEPA-latent TQC/HER around 0.83; reference TQC is in
-the high 0.8 range.
+Best controller: goal-frame equivariant ballistic HWM,
+**0.848 and 0.857 on independent 1000-episode blocks (0.853/2000 aggregate)**.
 
 Directions tried:
 
 - Long-horizon flow priors.
-- RL-trial flow priors.
+- Trial-conditioned flow priors.
 - Future-conditioned inverse priors.
 - Goal-conditioned inverse variants.
 - JEPA ranking/refinement.
 - Action scaling and execution horizon changes.
+- Event-conditioned ballistic HWM: predict the absorbing post-coast JEPA latent
+  and puck displacement from the pre-impact latent and a compact strike macro;
+  choose once, strike once, then coast without replanning.
 
-Why these do not work yet relative to the retained RL baseline:
+Why the generic variants did not work:
 
 - Slide is ballistic. The key control decision is the initial strike impulse,
   after which the agent has little corrective authority.
 - Receding-horizon JEPA ranking favors locally plausible contact but does not
   reliably predict long puck coasting under friction.
-- The task likely needs a strike-specific latent objective or impulse prior
-  rather than generic future-conditioned chunk imitation.
+- The task needs a strike-specific latent objective and impulse macro rather
+  than generic future-conditioned chunk imitation.
+
+The first ballistic modification validated that diagnosis. With normalized raw
+state as a precision side channel, endpoint MAE improved from 0.053 to 0.033 and
+external success progressed 0.42 -> 0.56 -> 0.59 -> 0.668 -> 0.725 -> 0.735.
+The next model removes global table orientation from endpoint regression:
+contact geometry, velocities, and strike direction are expressed in the live
+puck-to-goal frame; Fourier features and gated residual blocks model the contact
+response; endpoint-distance quantile sampling keeps rare accurate strikes from
+being drowned out. Its honest held-out endpoint MAE is 0.0238 before
+calibration. V8 scores 0.806/3000. Feeding those selected macro→observed endpoint
+transitions back into the same self-supervised event model produces V9:
+**0.848/1000 and 0.857/1000**, mean final distances 0.0310 and 0.0294. No reward,
+critic, value, or policy gradient is used. Pre-contact alignment remains
+scripted.
 
 ## HandManipulate (Shadow Hand in-hand reorientation)
 
@@ -821,14 +881,15 @@ model + planning; NO policy/value/reward, NO demos):
 - iCEM planner (`eval_handmanipulate_icem.py`): FFT colored noise (beta=2.5),
   keep-and-shift elite memory, contact-breaking finger-motion bonus, disagreement
   penalty.
-- GC-PMPC on-policy loop (`train_dexterous_mbrl.py`): iCEM <-> WM retrain.
+- On-policy calibration loop (`train_dexterous_onpolicy_wm.py`): iCEM
+  collection followed by world-model retraining.
 
 Result: **long-horizon iCEM breaks the ceiling** (object gaits ~70 deg vs the
 ~25 deg greedy cap), confirming the literature that gaiting emerges from
 long-horizon planning. But it WANDERS rather than converging: success ~0.05,
 median final gap ~80-92 deg. Cause: WM 8-step error ~12 deg on iCEM's own actions
 vs ~8 deg on OU (model exploitation), and 15 deg WM error at H=32 caps terminal
-precision below the 5.7 deg threshold. The on-policy MBRL loop did NOT bootstrap
+precision below the 5.7 deg threshold. The on-policy calibration loop did NOT bootstrap
 (0.05 -> 0.025 -> 0.0 -> 0.0 over 4 rounds). Demo-free RotateZ best stays
 ~0.05-0.10 after flow, long-horizon iCEM, and the on-policy loop. Gap to
 GC-PMPC's 70-80% not closed in a single session; their probabilistic-ensemble WM

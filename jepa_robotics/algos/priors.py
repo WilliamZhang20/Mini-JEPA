@@ -7,6 +7,23 @@ import torch
 from torch import nn
 
 
+def parse_horizons(value: str) -> list[int]:
+    """Parse a comma-separated positive horizon set for training CLIs."""
+    horizons = sorted({int(v) for v in value.split(",") if v.strip()})
+    if not horizons or min(horizons) < 1:
+        raise ValueError("future horizons must be positive, e.g. 4,8,12,16")
+    return horizons
+
+
+def append_emphasis(parts: list, state: torch.Tensor, checkpoint: dict) -> None:
+    """Append a checkpoint-declared repeated live-state feature slice."""
+    dims = checkpoint.get("emphasis_dims")
+    repeat = int(checkpoint.get("emphasis_repeat", 0) or 0)
+    if dims and repeat > 0:
+        lo, hi = (int(x) for x in dims.split(","))
+        parts.append(state[:, lo:hi].repeat(1, repeat))
+
+
 class InversePrior(nn.Module):
     """MLP inverse model mapping future-conditioned latents to action chunks."""
 
@@ -133,3 +150,32 @@ def sample_action_chunks(
         mean = (a - betas[t] / torch.sqrt(1 - abar[t]) * eps) / torch.sqrt(alphas[t])
         a = mean + torch.sqrt(betas[t]) * torch.randn_like(a) if t > 0 else mean
     return a
+
+
+def sample_chunk(
+    net: nn.Module,
+    ddpm: dict,
+    cond: torch.Tensor,
+    chunk_dim: int,
+    device,
+    objective: str = "diffusion",
+    flow_steps: int = 16,
+    cfg_weight: float = 1.0,
+    init_noise_scale: float = 1.0,
+) -> torch.Tensor:
+    """Compatibility spelling for the shared action-chunk sampler.
+
+    Unlike the old evaluator-local implementation, this lives beside the
+    network and diffusion schedule used by both training and evaluation.
+    """
+    return sample_action_chunks(
+        net,
+        ddpm,
+        cond,
+        chunk_dim,
+        device,
+        objective=objective,
+        flow_steps=flow_steps,
+        cfg_weight=cfg_weight,
+        init_noise_scale=init_noise_scale,
+    )

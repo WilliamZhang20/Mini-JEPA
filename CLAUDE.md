@@ -19,8 +19,9 @@ futures. A future-conditioned action prior proposes chunks from `(z_t,
 z_future)`, and an action-conditioned JEPA model predicts or verifies whether
 the chunk realizes the latent subgoal.
 
-BC/RL artifacts are retained only where the SSL latent-control replacement has
-not matched them.
+Reward/value/critic-based controller implementations and serialized agents are
+retired. Demonstration trajectories remain valid world-model and inverse-dynamics
+evidence.
 
 ## Where To Look
 
@@ -59,11 +60,11 @@ not matched them.
   diverse long tail (residual reach misses on outlier ball positions, residual
   placement offset, rare mid-transport drops).
 - PointMaze is solved with H-JEPA plus SSL inverse low level on checked runs.
-- AntMaze Medium/Large are not currently reproducible from historical HIQL logs.
+- AntMaze Medium/Large remain limited by low-level locomotion reliability.
 - FrankaKitchen is open. The old 0.90 full-4 log is not reproducible; raw flow
   around two subtasks is the current fallback.
-- FetchSlide remains RL-retained because ballistic strike control has not yet
-  been matched by the SSL action-prior planners.
+- FetchSlide uses the goal-frame equivariant event HWM and commit-and-coast
+  controller; the retired model-free branch is no longer part of the repo.
 
 ## Environment Notes
 
@@ -71,8 +72,8 @@ not matched them.
 - Use `MUJOCO_GL=egl` for MuJoCo rendering.
 - Prefer `--device auto` or `--device cuda` on the H200 GPU.
 - Experiment artifacts live under `runs/`.
-- Adroit explore artifacts are canonical under `runs/adroit_*/explore`; old
-  `runs/adroit_*_explore` paths are symlinks.
+- Adroit explore artifacts are canonical under `runs/adroit_*/explore`; no
+  duplicate top-level aliases are retained.
 
 ## Validation Rules
 
@@ -90,5 +91,5 @@ not matched them.
 - Do not revert user or prior-run changes unless explicitly asked.
 - Keep generated artifacts out of source changes unless they are videos or notes
   the user explicitly requested.
-- When replacing BC/RL with SSL control, update both the docs and the artifact
-  cleanup state.
+- When replacing a controller, update both the docs and the artifact cleanup
+  state.

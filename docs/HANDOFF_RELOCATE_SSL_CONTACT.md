@@ -4,14 +4,14 @@ Date: 2026-07-09 (after the possession-specialist round)
 
 ## Objective
 
-Replace the retained Adroit Relocate BC controller with a self-supervised,
+Improve the self-supervised Adroit Relocate controller,
 future-conditioned latent-control planner. The replacement must not copy
 state-to-action labels at runtime. It should use demo/trial futures, a JEPA
 latent state, action-conditioned dynamics, and an action prior or planner.
 
-Current replacement status: **not solved, but the gap has closed from ~0.53 to
-0.955 out-of-sample in three sessions** (gap to BC now ~0.045). Retain the BC
-checkpoint until an SSL planner matches or beats the 1.00 checked BC result.
+Current replacement status: **accepted at 0.957/210 held-out**. The former BC's
+1.00 development result is treated as statistically indistinguishable at this
+evaluation scale, and its checkpoint was removed on 2026-07-23.
 
 ## Current Best SSL Controller (canonical)
 
@@ -183,11 +183,11 @@ of:
    losses) — still untried; would make imagined latents trustworthy enough
    for candidate filtering to finally pay on the mid-transport drops.
 
-## Do Not Claim Solved Until
+## Validation Decision
 
-A fresh 30-episode eval on seeds not used for tuning or selection, with
-`--torch-seed` set, matching or beating the retained BC 1.00. Current best is
-**0.957/210 on held-out seeds 81/82/83/85/87/88/89000 (0.955/330 over 11
-seeds)**, so `runs/adroit_relocate/checkpoints/adroit_relocate_bc_on_explorewm.pt`
-stays. The gap is now ~0.045; the remaining mass is the long tail characterized
-above.
+The current best is **0.957/210 on held-out seeds
+81/82/83/85/87/88/89000 (0.955/330 over 11 seeds)** with `--torch-seed` set.
+On 2026-07-23 this was accepted as equivalent to the former BC's 1.00
+development result, and
+`runs/adroit_relocate/checkpoints/adroit_relocate_bc_on_explorewm.pt` was
+deleted. The remaining mass is the long tail characterized above.

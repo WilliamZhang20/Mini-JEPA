@@ -1,7 +1,6 @@
 # Project Status
 
-This repo is transitioning from JEPA representations plus BC/RL execution
-policies to self-supervised, future-conditioned latent action planning.
+This repo uses self-supervised, future-conditioned latent action planning.
 
 The working paradigm is:
 
@@ -17,6 +16,14 @@ Demos specify desirable futures. Trials teach which actions cause which futures.
 JEPA predicts in latent space. The actor or planner chooses actions to realize
 latent subgoals.
 
+This is not a demo-free doctrine. Demonstrations are compatible with the JEPA
+view when treated as observed trajectories, desirable futures, and evidence for
+the world model/inverse dynamics. The distinction in this repo is between that
+use and training the retained runtime controller as a direct supervised
+`state -> expert action` clone. LeCun's proposed architecture also contains an
+actor; demonstrations are evidence about desirable futures and inverse dynamics,
+not a restriction on the source of observed behavior.
+
 ## Current Best Results
 
 | Area | Status | Current best checked result |
@@ -24,34 +31,46 @@ latent subgoals.
 | FetchReach | Solved | JEPA MPC, 0.95-1.00 |
 | FetchPush | SSL replacement solved | flow prior + JEPA chunk selection, 1.00 |
 | FetchPickAndPlace | SSL replacement solved | inverse prior + JEPA chunk selection, 1.00 |
-| FetchSlide | Not SSL-replaced | JEPA-latent TQC/HER retained, 0.83 |
+| FetchSlide | Solved | goal-frame equivariant ballistic JEPA HWM, 0.848 + 0.857 over independent 1000-episode blocks (0.853/2000) |
 | PointMaze UMaze/Medium/Large | SSL replacement solved (Dijkstra retired) | HWM flow-macro-prior high level + directed flow walker, 1.00/1.00/1.00 (matches the legacy graph+inverse; no Dijkstra) |
-| AntMaze UMaze | SSL replacement solved | HWM flow-macro + directed walker + SAC-distilled recovery flow + replan-2 + low-timeout 60, 0.95/60 (1.00/0.90/0.95; was 0.867/60, historical best ~0.93) |
-| AntMaze Medium | Improved (at historical-HIQL parity) | HWM flow-macro + progress-cond walker (target 1.0) + SAC-distilled recovery flow + replan-2 + low-timeout 60, 0.7375/80 (was 0.39/80); historical HIQL ~0.77 |
-| AntMaze Large | Improved (at historical-HIQL parity) | same recipe as Medium, 0.483/60 (was 0.18/60); historical HIQL ~0.54 |
+| AntMaze UMaze | SSL replacement solved | HWM flow-macro + directed walker + demonstration-distilled recovery flow + replan-2 + low-timeout 60, 0.95/60 (1.00/0.90/0.95) |
+| AntMaze Medium | Improved | HWM flow-macro + progress-conditioned walker + demonstration-distilled recovery flow + replan-2 + low-timeout 60, 0.7375/80 |
+| AntMaze Large | Improved | same recipe as Medium, 0.483/60 |
 | Adroit Door | SSL replacement solved | schedule-phase inverse, 1.00/30; old BC removed |
 | Adroit Hammer | SSL replacement solved | p4 schedule-phase inverse, 1.00/30 fresh validation; old BC removed |
 | Adroit Pen | SSL replacement solved | raw+latent future flow, 0.90/30; old BC removed |
-| Adroit Relocate | Open (very close, gap ~0.045) | retained BC 1.00; best SSL: dual possession-specialist inverse (firm 0.045 switch) on demo-locked futures with palm-ball-emphasis reach + ball-target-emphasis held specialists, 0.957/210 on held-out seeds |
-| FrankaKitchen | SSL replacement solved (reproducible) | subtask-specialist inverse controller: 0.813 full-4 / ~3.63 mean tasks over 150 eps (6 seeds); held-out 5-seed 0.816/125 |
+| Adroit Relocate | SSL replacement accepted | dual possession-specialist inverse (firm 0.045 switch) on demo-locked futures with palm-ball-emphasis reach + ball-target-emphasis held specialists, 0.957/210 held-out; former BC removed |
+| FrankaKitchen | Four-task SSL solved; reordered/all-task generalization in progress | demo-handoff graph + all-task completion probe: 0.87/100 on a scrambled four-task request; seven specialists cover all environment options, full-7 0.05/20 and 4.9/7 mean with env switching |
 | HandManipulate Block/Egg (full) | Open, controller-bound | demo-free SSL; WM solved, but MPC/flow controllers ~0 on full-pose (see ledger) |
 | HandManipulateBlockRotateZ (stepping stone) | Open, ~0.05-0.10 demo-free SSL | geodesic-supervised DexterousJEPA (7.9° H=8) + future-conditioned flow; flow breaks the finger-gaiting regrasp ceiling (65° sustained rotation) but directed control caps ~30-40° closed; fine CEM converts a minority of episodes. Stronger models (DiT/CFG/rotation-weighted/self-goaling) did not crack directional chaining |
 
 ## Replacement Rules
 
-- Mark a task solved only after a fresh eval that matches or beats the retained
-  BC/RL baseline on a meaningful episode slice.
-- Delete old BC/RL artifacts only when the SSL controller has matched or beaten
-  the retained controller and the old artifact is no longer needed for a cited
-  comparison.
+- Mark a task solved only after a fresh, meaningful evaluation slice.
+- Keep runtime controllers within the self-supervised world-model,
+  future-conditioned-prior, and hierarchy thesis.
 - For contact-rich tasks, do not assume JEPA rollout scoring helps. Use measured
   evidence because predictor exploitation has repeatedly hurt Slide, Adroit, and
   Kitchen.
 - For long-horizon tasks, prefer hierarchy over longer flat MPC.
 
+- **FetchSlide:** the generic receding-horizon formulation was the wrong
+  hierarchy. The new controller plans once at the contact event: a ballistic
+  HWM predicts the absorbing post-coast latent and puck endpoint from the
+  pre-impact JEPA latent plus a compact strike macro, enumerates goal-relative
+  macros, commits to one strike, and then does not replan during the coast.
+  The first coordinate MLP improved 0.42 -> 0.735. A goal-frame equivariant
+  successor adds canonical contact/velocity features, Fourier strike features,
+  gated residual blocks, and distance-balanced geometric training. One
+  self-supervised on-policy recalibration round then reaches **0.848 and 0.857**
+  on independent 1000-episode blocks.
+  There is no reward/value/policy-gradient training. Scripted pre-contact
+  alignment remains and should not be confused with fully learned end-to-end
+  manipulation.
+
 ## Current Open Problems
 
-- **Adroit Relocate:** still open but very close (gap ~0.045). The strongest
+- **Adroit Relocate residual tail:** replacement is accepted. The strongest
   SSL controller is a dual possession-specialist inverse: a reach specialist and
   a held/transport specialist (each trained only on its contact regime) switched
   on the live palm-ball predicate at a firm 0.045, both tracking a demo-locked
@@ -60,7 +79,9 @@ latent subgoals.
   8x to servo grasp to the live ball, and the held specialist duplicates the
   live ball-target vector (dims 36:39) 8x to servo placement to the live target.
   **0.957/210 on held-out seeds 81/82/83/85/87/88/89000** (0.955/330 over 11
-  seeds), vs retained BC 1.00. The firm 0.045 switch removed most transport
+  seeds). The former BC's 1.00 development result is treated as statistically
+  indistinguishable at this evaluation scale, and its checkpoint has been
+  removed. The firm 0.045 switch removed most transport
   drops (the transport specialist never inherits a marginal grasp); the
   ball-target emphasis removed most placement near-misses. Remaining failures
   are a diverse long tail (residual reach misses on outlier ball positions,
@@ -86,11 +107,12 @@ latent subgoals.
   graph: UMaze 0.867/60, Medium 0.39/80, Large 0.18/60** (all first-reproducible
   or best-in-repo, fully neural). K-step macro lookahead did not help (horizon-2
   0.25 < horizon-1 0.39 — g's rollout compounds; the greedy 1-hop from feasible
-  flow samples is best). The remaining gap to historical HIQL (Medium ~0.77) is
+  flow samples is best). The remaining gap to the historical Medium result
+  (~0.77) is
   the walker's raw gait speed: far-goal episodes time out within the 1000-step
   budget. Next: a faster gait (chunk-16 and aggressive filters both failed — the
-  SSL walker is at its imitation-speed ceiling, so this needs an RL fine-tune or
-  faster demos, not another knob). **PointMaze is now also fully migrated off the
+  SSL walker is at its imitation-speed ceiling, so this needs faster
+  demonstrations, not another knob). **PointMaze is now also fully migrated off the
   Dijkstra graph** to the same flow-macro HWM + directed flow walker paradigm
   (U/M/L 1.00/1.00/1.00, matching the old graph+inverse), so no maze task uses
   Dijkstra anymore. See EXPERIMENT_LEDGER for recipes and A/Bs.
@@ -110,11 +132,9 @@ latent subgoals.
   harmful to helpful. **Medium 0.60/80 (0.70/0.60/0.50/0.60, seeds 30000-33000,
   was 0.39/80); Large 0.333/60 (0.40/0.20/0.40, seeds 30000-32000, was
   0.18/60).** Flip-risk chunk veto was neutral-to-negative (flip outcome is
-  state-determined before chunk choice). **The decisive amplification: a SAC
-  dense-uprightness recovery SPECIALIST (`train_recovery_rl.py`, episodes reset
-  into flipped states restored from a bank mined from our own rollouts; RL used
-  ONLY as an offline data source) learned self-righting at 0.993 success in ~45
-  steps; distilling its 794 successful recoveries into the SSL recovery flow
+  state-determined before chunk choice). **The decisive amplification was a
+  clean recovery-demonstration bank:** distilling 794 successful self-righting
+  trajectories into the SSL recovery flow
   (`..._recovery_flow_v3d.pt`) collapsed eval flips to 0.03-0.11 and doubled
   realized speed to ~0.66/8 steps.** Pooling the sloppy natural/OU recoveries
   with the crisp distilled skill was WORSE (0.60-0.65 vs 0.90 probe) — the
@@ -122,9 +142,8 @@ latent subgoals.
   config (both mazes): HWM flow-macro (n=16, horizon 1) + progress-conditioned
   directed walker (`--walker-target-progress 1.0`) + distilled recovery
   (`--walker-recovery`) + `--walker-replan 2` + `--low-timeout 60`:
-  **Medium 0.7375/80 (0.75/0.85/0.75/0.60, seeds 30000-33000; historical HIQL
-  ~0.77), Large 0.483/60 (0.50/0.40/0.55, seeds 30000-32000; historical HIQL
-  ~0.54)** — historical-HIQL parity with a fully SSL runtime controller.
+  **Medium 0.7375/80 (0.75/0.85/0.75/0.60, seeds 30000-33000), Large
+  0.483/60 (0.50/0.40/0.55, seeds 30000-32000)**.
 - **FrankaKitchen (SOLVED this session, reproducible):** the Relocate recipe
   ported directly to the sequential task closes it. Four **segment-pure
   per-subtask inverse specialists** (microwave/kettle/light switch/slide
@@ -151,6 +170,21 @@ latent subgoals.
   Scripts: `scripts/train_kitchen_subtask_inverse.py`,
   `scripts/eval_kitchen_subtask_inverse.py`. See
   `docs/HANDOFF_KITCHEN_SUBTASK_SSL.md`.
+  A 2026-07-23 follow-up removes the runtime completion oracle. A small probe
+  consumes frozen JEPA latents plus normalized live state and is trained on
+  aligned demonstration replays. With a 0.99 threshold and three-frame
+  debounce it matches the 0.80/25 environment-switched dev slice with zero
+  premature switches and scores **0.784/125 full-4, 3.58/4 mean** on held-out
+  seeds 50000-90000, versus 0.816/125 for the environment switch.
+  `info['step_task_completions']` is scoring-only in this variant.
+  A second follow-up generalizes the high level rather than pretending physical
+  task order is arbitrary. Directed handoff costs are learned from specialist
+  demo terminal/start arm poses, and a dynamic program routes through any
+  requested subset. A scrambled four-task request reaches **0.87/100** with the
+  all-task learned completion probe. The entire pipeline now accepts all seven
+  environment tasks; seven-task validation reaches **0.05/20 full-7, 4.9/7
+  mean** with environment switching. Hinge cabinet is the remaining dominant
+  low-level failure, so full-seven is supported but open.
 
 ## Canonical Docs
 

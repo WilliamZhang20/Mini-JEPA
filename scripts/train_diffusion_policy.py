@@ -1,7 +1,7 @@
 """Diffusion policy (action-chunked) on the frozen JEPA latent — the research-grade
 low-level controller for FrankaKitchen.
 
-Flat feedforward control (BC / TD3+BC / latent Dreamer) all hit ~0 on kitchen for two
+Flat feedforward control hit ~0 on kitchen for two
 reasons the diagnostics isolated: (a) a per-step deterministic policy compounds error
 over the 280-step contact sequence, and (b) it averages the *multimodal* demos
 (different task orders) into mush. A diffusion policy attacks both:

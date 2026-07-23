@@ -23,7 +23,7 @@ from jepa_robotics.algos.phase import batch_phase_features
 from jepa_robotics.algos.priors import InversePrior
 from jepa_robotics.data import load_episodes_npz
 from jepa_robotics.evaluate import load_jepa_artifact
-from scripts.train_fetch_flow_prior import parse_horizons
+from jepa_robotics.algos.priors import parse_horizons
 
 
 @torch.no_grad()

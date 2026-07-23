@@ -2,7 +2,7 @@
 
 This is SSL self-imitation data: the current SSL controller generates trials,
 and successful trials are saved as transition evidence for the next
-future-conditioned action prior. The collector does not use a BC/RL policy.
+future-conditioned action prior. The collector is not a runtime policy.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from jepa_robotics.envs import flatten_obs, make_env
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
 from scripts.eval_flat_future_flow import FlatFlowPolicy
-from scripts.eval_flat_future_inverse import NearestFutureIndex
+from jepa_robotics.algos.futures import NearestFutureIndex
 
 
 def main() -> None:

@@ -21,76 +21,11 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 from jepa_robotics.envs import make_env, flatten_obs
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.tasks import resolve_task
-from jepa_robotics.algos.priors import EpsNet, make_ddpm
+from jepa_robotics.algos.task_families.kitchen import KITCHEN_TASKS, KitchenScheduler
+from jepa_robotics.algos.priors import EpsNet, make_ddpm, sample_chunk
 
-DEFAULT_TASKS = ["microwave", "kettle", "light switch", "slide cabinet"]   # standard D4RL complete-v2 set
-
-
-class Scheduler:
-    """Pick the target subtask. Default: first incomplete (canonical). With a
-    timeout: if the current target stalls, rotate to the next incomplete one so
-    the policy attempts all remaining tasks instead of dead-ending on a hard one."""
-    def __init__(self, tasks, timeout=0):
-        self.tasks = tasks
-        self.timeout = timeout; self.cur = 0; self.t_on = 0
-
-    def update(self, done_tasks):
-        done_idx = {i for i, t in enumerate(self.tasks) if t in done_tasks}
-        incomplete = [i for i in range(len(self.tasks)) if i not in done_idx]
-        if not incomplete:
-            return self.cur
-        if self.cur not in incomplete:                       # current done -> advance
-            self.cur = incomplete[0]; self.t_on = 0
-        elif self.timeout > 0 and self.t_on >= self.timeout:  # stalled -> rotate
-            order = [i for i in incomplete if i > self.cur] + [i for i in incomplete if i < self.cur]
-            self.cur = order[0]; self.t_on = 0
-        else:
-            self.t_on += 1
-        return self.cur
-
-
-@torch.no_grad()
-def sample_chunk(
-    net,
-    ddpm,
-    cond,
-    chunk_dim,
-    device,
-    objective="diffusion",
-    flow_steps=16,
-    cfg_weight=1.0,
-    init_noise_scale=1.0,
-):
-    """Sample one action chunk conditioned on cond [B, condL].
-    diffusion -> DDPM reverse; flow -> Euler ODE integration of the velocity field.
-    cfg_weight>1 applies classifier-free guidance: pred = uncond + w*(cond - uncond)."""
-    B = cond.shape[0]
-    guided = cfg_weight != 1.0
-    null = torch.zeros_like(cond) if guided else None
-
-    def predict(x, t):
-        out = net(x, t, cond)
-        if guided:
-            out_u = net(x, t, null)
-            out = out_u + cfg_weight * (out - out_u)
-        return out
-
-    if objective == "flow":
-        T = ddpm["T"]
-        x = torch.randn(B, chunk_dim, device=device) * init_noise_scale
-        dt = 1.0 / flow_steps
-        for i in range(flow_steps):
-            tau = torch.full((B,), i * dt, device=device)
-            x = x + dt * predict(x, tau * T)     # same time scaling as training
-        return x
-    betas, alphas, abar, T = ddpm["betas"], ddpm["alphas"], ddpm["abar"], ddpm["T"]
-    a = torch.randn(B, chunk_dim, device=device) * init_noise_scale
-    for t in reversed(range(T)):
-        tt = torch.full((B,), t, device=device, dtype=torch.long)
-        eps = predict(a, tt)
-        mean = (a - betas[t] / torch.sqrt(1 - abar[t]) * eps) / torch.sqrt(alphas[t])
-        a = mean + torch.sqrt(betas[t]) * torch.randn_like(a) if t > 0 else mean
-    return a
+DEFAULT_TASKS = KITCHEN_TASKS
+Scheduler = KitchenScheduler
 
 
 def main() -> None:

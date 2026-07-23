@@ -17,11 +17,13 @@ demo bank (`kitchen_subtask_light_arm_wide.pt`).
 **0.816 / 125 eps**, mean ~3.6/4. Baseline (reproducible raw flow): 0.00 full-4,
 2.05 mean. (The earlier 400-segment light specialist scored 0.773/150.)
 
-**Task order is not free:** an order-agnostic greedy scheduler (`--scheduler
-greedy`, pick most-reachable uncompleted subtask by demo-match distance) scores
-only 0.25-0.40 -- the demos encode physical dependencies (the light switch is
-only reliably reachable from the post-kettle arm pose; light-after-slide ~0.00).
-The fixed canonical order (matching the dominant demo order) is near-optimal.
+**Task order is not physically free, but it no longer has to be hardcoded.**
+The original greedy scheduler (`--scheduler greedy`) scores only 0.25-0.40
+because it ignores downstream handoffs. The newer `--scheduler graph` learns
+directed terminal-to-start arm-pose costs from specialist demos and recovers the
+viable microwave→kettle→light→slide route even when the requested list is
+scrambled. With the all-task learned completion probe that reordered check
+scores 0.87/100.
 
 ## Controller (canonical)
 
@@ -97,8 +99,10 @@ not slowness.
 
 ## Do not claim solved beyond this
 
-The numbers above are with `--torch-seed 0`. The controller uses the env's
-ground-truth `step_task_completions` for the firm switch (available at eval
-time); this is the sequential analog of Relocate's live palm-ball predicate.
-The retained BC/TD3+BC Kitchen artifacts can be revisited for cleanup once a
-controller matches the old 0.90.
+The numbers above are with `--torch-seed 0` and describe the original
+environment-switched reference. The runtime oracle has since been replaced by
+`scripts/train_kitchen_completion_probe.py` plus
+`eval_kitchen_subtask_inverse.py --completion-mode learned`. The aligned-replay
+probe (0.99 threshold, three-frame debounce) reaches 0.784/125 full-4 and
+3.58/4 mean on held-out seeds, versus 0.816/125 for the reference. Environment
+completion events are scoring-only in that variant.

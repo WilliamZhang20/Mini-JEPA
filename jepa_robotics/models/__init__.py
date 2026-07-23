@@ -2,7 +2,8 @@
 
 ``ActionConditionedJEPA`` is the shared action-conditioned world model used
 across all tasks (Fetch, PointMaze, ...). Per-task behaviour lives in the
-data experts (data.py), task configs (tasks.py) and MPC scoring (scoring/),
+data experts (data.py), task configs (tasks.py) and planning objectives
+(algos/planning/objectives/),
 not in the model itself. Components are split into submodules for clarity and
 to make Roadmap-A extensions (ensemble heads, stochastic latent) additive.
 """

@@ -29,7 +29,7 @@ from jepa_robotics.data import load_episodes_npz
 from jepa_robotics.evaluate import load_jepa_artifact
 from jepa_robotics.algos.priors import EpsNet
 from jepa_robotics.models import DexterousFlowPrior
-from scripts.train_fetch_flow_prior import parse_horizons
+from jepa_robotics.algos.priors import parse_horizons
 
 
 def main() -> None:

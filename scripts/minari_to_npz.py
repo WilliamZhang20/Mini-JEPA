@@ -1,7 +1,7 @@
 """Convert a Minari (D4RL) offline dataset to the JEPA ``Episode`` npz format.
 
-The Adroit envs have no scriptable expert, and from-scratch RL doesn't reliably
-solve them, so the real data source is offline expert demonstrations. This adapts
+The Adroit envs have no scriptable expert, so the data source is offline expert
+demonstrations. This adapts
 D4RL/<task>/expert-v2 (obs/action dims match our gymnasium-robotics v1 envs) into
 the same ragged (states, actions) npz that train.py / train_policy.py read via
 ``--episodes-npz`` — feeding both the world model and a BC controller.

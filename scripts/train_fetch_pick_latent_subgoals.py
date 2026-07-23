@@ -1,6 +1,6 @@
 """Build self-supervised latent subgoals for Fetch push/pick/slide experiments.
 
-This is an experimental alternative to BC/RL-tuned controllers. Demos identify
+This is an experimental latent-future controller. Demos identify
 desirable futures; their action labels are not a supervised policy target and
 are not saved in this artifact. The already-trained JEPA dynamics model remains
 the source of "which actions cause which futures".

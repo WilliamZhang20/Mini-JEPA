@@ -65,8 +65,8 @@ TASKS = {
         horizons="1,2,4,8,16,24",
     ),
     # Tier 3 — Adroit hand suite. Flat (non-goal) obs, dense reward, 24-30-D
-    # action; no scriptable expert, so data comes from a learned RL teacher (or
-    # exploratory rollouts for the world model). controller="none" -> random
+    # action; no scriptable expert, so data comes from offline demonstrations or
+    # exploratory rollouts for the world model. controller="none" -> random
     # collection. Difficulty order: Door < Hammer < Pen < Relocate.
     "adroit_door": TaskConfig(
         name="adroit_door",
@@ -176,7 +176,7 @@ TASKS = {
     # AntMaze (Tier-2 tail): 8-DoF quadruped locomotion UNDER navigation. Env
     # version -v4 matches the Minari D4RL offline datasets (27-D obs). No scripted
     # expert (controller="none"); the low-level is BC on offline data. Used for
-    # the canonical Hierarchical-JEPA demonstration (flat HER fails on ant mazes).
+    # the canonical Hierarchical-JEPA demonstration.
     "antmaze_umaze": TaskConfig(
         name="antmaze_umaze",
         env_id="AntMaze_UMaze-v4",

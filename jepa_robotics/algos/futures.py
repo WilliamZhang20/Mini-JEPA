@@ -4,6 +4,29 @@ from __future__ import annotations
 import numpy as np
 
 
+class NearestFutureIndex:
+    """Nearest-neighbour lookup from live states to demonstrated futures."""
+
+    def __init__(self, states: np.ndarray, futures: np.ndarray, normalizer) -> None:
+        self.states = states.astype(np.float32)
+        self.futures = futures.astype(np.float32)
+        self.norm_states = normalizer.encode(self.states)
+        try:
+            from scipy.spatial import cKDTree
+
+            self.tree = cKDTree(self.norm_states)
+        except Exception:
+            self.tree = None
+
+    def query(self, state: np.ndarray, normalizer) -> np.ndarray:
+        x = normalizer.encode(state).astype(np.float32)
+        if self.tree is not None:
+            _dist, idx = self.tree.query(x, k=1)
+            return self.futures[int(idx)]
+        distance = np.linalg.norm(self.norm_states - x[None], axis=1)
+        return self.futures[int(np.argmin(distance))]
+
+
 class DemoLockedFutureIndex:
     """Trajectory-locked future lookup for receding-horizon SSL planning.
 

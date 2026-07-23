@@ -452,9 +452,8 @@ def load_spec_npz(path) -> ObsSpec | None:
 
 
 def load_episodes_npz(path) -> list[Episode]:
-    """Load pre-collected trajectories (e.g. from an RL teacher) saved as object
-    arrays of per-episode ``states``/``actions`` — used for tasks with no scripted
-    expert (Adroit) where the data source is a learned teacher, not a controller."""
+    """Load pre-collected demonstration trajectories saved as object arrays of
+    per-episode ``states``/``actions`` for tasks without scripted experts."""
     data = np.load(path, allow_pickle=True)
     states = data["states"]
     actions = data["actions"]

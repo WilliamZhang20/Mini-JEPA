@@ -18,7 +18,7 @@ from jepa_robotics.envs import flatten_obs, goal_state_from_state, make_env
 from jepa_robotics.evaluate import load_jepa_artifact, rollout_policy
 from jepa_robotics.subgoals import load_subgoal_artifact, make_latent_subgoal_target_state
 from jepa_robotics.tasks import resolve_task
-from scripts.train_fetch_flow_prior import fetch_geometry_features
+from jepa_robotics.algos.task_families.fetch import geometry_features as fetch_geometry_features
 from jepa_robotics.algos.priors import InversePrior
 
 

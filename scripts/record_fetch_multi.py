@@ -6,8 +6,8 @@ MP4 per task. Goals are randomized per episode (and pick alternates table /
 mid-air targets) so the clip shows variety.
 
     PYTHONNOUSERSITE=1 MUJOCO_GL=egl python scripts/record_fetch_multi.py \
-        --model-path runs/fetch_multi/fetch_multi_model.pt \
-        --policy-path runs/fetch_multi/fetch_multi_policy.pt \
+        --model-path runs/fetch_multi/checkpoints/fetch_multi_model.pt \
+        --policy-path runs/fetch_multi/checkpoints/fetch_multi_policy.pt \
         --episodes 6 --out-dir runs/fetch_multi
 """
 from __future__ import annotations

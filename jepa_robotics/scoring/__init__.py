@@ -1,13 +1,8 @@
-"""Per-task MPC scoring strategies, split out of evaluate.py.
+"""Compatibility facade for planning objectives.
 
-Each mixin provides one ``_*_scores`` method; ``JEPAMPCPolicy`` composes them
-and dispatches on ``score_mode``. Add a new task's score as a new mixin here
-(e.g. a maze sub-goal score) without touching the planner core.
+New code should import :mod:`jepa_robotics.algos.planning.objectives`.
 """
 
-from .common import CommonScoringMixin
-from .manip import ManipScoringMixin
-from .strike import StrikeScoringMixin
-from .goal import GoalScoringMixin
+from ..algos.planning.objectives import CommonScoringMixin, GoalScoringMixin, ManipScoringMixin, StrikeScoringMixin
 
 __all__ = ["CommonScoringMixin", "ManipScoringMixin", "StrikeScoringMixin", "GoalScoringMixin"]

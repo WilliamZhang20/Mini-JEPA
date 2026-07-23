@@ -280,7 +280,7 @@ def make_argparser() -> argparse.ArgumentParser:
         "--episodes-npz",
         type=Path,
         default=None,
-        help="Load pre-collected trajectories (RL-teacher data) from this .npz instead of "
+        help="Load pre-collected demonstrations from this .npz instead of "
              "scripted/random collection. Used for tasks with no scripted expert (Adroit).",
     )
     parser.add_argument("--collect-log-every", type=int, default=10_000)
@@ -405,10 +405,10 @@ def main() -> None:
 
     env = make_env(args.env_id, seed=args.seed, max_episode_steps=args.max_episode_steps)
     if args.episodes_npz is not None:
-        # Pre-collected trajectories: an RL teacher (Adroit) OR the canonical
+        # Pre-collected demonstrations (Adroit) or the canonical
         # multi-task Fetch union (Roadmap B). When the npz carries its own
         # ObsSpec (canonical union, whose 35-D state matches no single env), use
-        # it; otherwise fall back to the env's spec (Adroit teacher data).
+        # it; otherwise fall back to the env's spec.
         from .data import load_episodes_npz, load_spec_npz
         from .envs import obs_spec_from_env
 

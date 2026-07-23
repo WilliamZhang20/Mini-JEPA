@@ -92,7 +92,7 @@ def main() -> None:
     p.add_argument("--lambda-object", type=float, default=5.0,
                    help="Extra weight on the object pose in the rollout decode (pos MSE + geodesic quaternion).")
     p.add_argument("--init-model", type=Path, default=None,
-                   help="Warm-start weights + REUSE the normalizer from this checkpoint (for cumulative on-policy MBRL rounds; keeps the latent space consistent).")
+                   help="Warm-start weights and reuse the normalizer for cumulative on-policy world-model calibration.")
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
 

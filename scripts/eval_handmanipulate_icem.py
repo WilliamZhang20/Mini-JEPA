@@ -14,7 +14,7 @@ one. This planner:
 * adds a contact-breaking bonus that rewards finger motion, so the optimizer does
   not fall into the "freeze the grip" local optimum where it never regrasps.
 
-Pure model-based planning over a self-supervised world model: no demos, no RL.
+Pure model-based planning over a self-supervised world model with no demos.
 """
 from __future__ import annotations
 

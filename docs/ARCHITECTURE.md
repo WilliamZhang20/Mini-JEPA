@@ -3,11 +3,11 @@
 The repo is now organized around a simple boundary:
 
 - `jepa_robotics/` is the importable package. Shared models, data adapters,
-  environment wrappers, scoring functions, and reusable SSL-control algorithms
-  belong here.
-- `scripts/` is the CLI layer. Scripts may parse arguments, load checkpoints,
-  launch training/eval loops, and write artifacts, but repeated model or
-  planning code should move into `jepa_robotics/`.
+  environment wrappers, planning objectives, and reusable SSL-control
+  algorithms belong here.
+- `scripts/` is the CLI layer, split into `data/`, `train/`, and `eval/`.
+  Scripts may parse arguments, load checkpoints, launch loops, and write
+  artifacts; they must not be imported as algorithm libraries.
 - `runs/` is artifact storage. It is intentionally outside source control except
   for small notes/videos that are already present in the working tree.
 - `docs/` holds project status, experiment ledgers, and design notes. `CLAUDE.md`
@@ -23,9 +23,16 @@ The repo is now organized around a simple boundary:
   flattening, and task-specific environment fixes.
 - `jepa_robotics/tasks.py`: task presets.
 - `jepa_robotics/evaluate.py`: common JEPA MPC and baseline evaluation code.
-- `jepa_robotics/scoring/`: reusable task score components for goal,
-  manipulation, and striking tasks.
-- `jepa_robotics/algos/`: reusable SSL latent-control pieces:
+- `jepa_robotics/algos/`: reusable SSL latent-control pieces, categorized as
+  the number of algorithms grows:
+  - `control/`: learned runtime predicates and other controller mechanisms.
+  - `planning/objectives/`: goal, manipulation, strike, and common trajectory
+    objectives used by MPC. These are planner algorithms, not evaluation
+    scripts. `jepa_robotics/scoring/` is now only a compatibility facade.
+  - `task_families/`: shared Fetch/Kitchen/maze geometry, metadata, collection
+    adapters, and Kitchen's demonstration-derived task-handoff graph.
+  - `world_models/`: specialized models above primitive dynamics, including
+    the goal-frame equivariant event-conditioned ballistic HWM.
   - `priors.py`: inverse action-chunk priors and diffusion/flow action-prior
     networks, plus the shared sampler.
   - `futures.py`: future-target selection strategies — the demo-locked future
@@ -38,18 +45,25 @@ The repo is now organized around a simple boundary:
   - `hwm.py`: hierarchical world model components (macro-action encoder + latent
     macro predictor) for the HWM high level (arXiv:2604.03208).
 
+`jepa_robotics/models/` already follows a model hierarchy: the world model,
+policy models, reusable MLP blocks, regularizers, and dexterous variants are
+separate modules. New task-specific policy or dynamics implementations should
+go under `algos/`, not beside a CLI.
+
 ## Script Policy
 
 When adding a new experiment:
 
-1. Put the reusable network/index/planning primitive in `jepa_robotics/algos` or
-   the appropriate package module.
-2. Keep the script focused on argument parsing, checkpoint IO, dataset assembly,
-   and calling the reusable primitive.
-3. Do not import train/eval classes from another script unless it is a short-term
-   compatibility shim. Promote duplicated code into the package first.
-4. Preserve existing script filenames when possible because many run records and
-   docs cite exact commands.
+1. Put reusable networks, indexes, samplers, objectives, task geometry, and
+   planners in the appropriate `jepa_robotics/algos` category.
+2. Add new CLIs under `scripts/data`, `scripts/train`, or `scripts/eval`.
+3. Do not import one CLI from another. Shared code is a package dependency.
+4. Root-level legacy filenames may be retained only as thin compatibility
+   launchers because run records cite exact commands.
+
+The FetchSlide and Kitchen pipelines are the first fully migrated vertical
+slices. Existing root scripts are being migrated incrementally; the rule above
+prevents further growth of the flat directory while preserving old commands.
 
 Retired (2026-07-10): the Dijkstra subgoal-graph maze controller
 (`eval_hjepa_maze.py`, `eval_hjepa2.py`, `record_hjepa_maze.py`) — replaced on
@@ -71,6 +85,6 @@ Adroit explore artifacts were merged under their task directories:
 - `runs/adroit_pen/explore`
 - `runs/adroit_relocate/explore`
 
-The old top-level `runs/adroit_*_explore` paths remain as symlinks for old
-commands. Canonical JEPA model symlinks live in each task's `checkpoints/`
+Explore runs live only under `runs/adroit_*/explore`. Canonical JEPA model
+symlinks live in each task's `checkpoints/`
 directory.

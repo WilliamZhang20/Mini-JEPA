@@ -22,7 +22,7 @@ from .envs import (
     obs_spec_from_env,
 )
 from .models import ActionConditionedJEPA
-from .scoring import (
+from .algos.planning.objectives import (
     CommonScoringMixin,
     GoalScoringMixin,
     ManipScoringMixin,
@@ -30,49 +30,6 @@ from .scoring import (
 )
 from .subgoals import load_subgoal_artifact, make_latent_subgoal_target_state
 from .tasks import TASKS, resolve_task, task_dir
-
-
-def patch_numpy_pickle_aliases() -> None:
-    """Register ``numpy._core`` module aliases so older SB3 pickles unpickle on newer NumPy."""
-    try:
-        import numpy.core as numpy_core
-    except ImportError:
-        return
-
-    import importlib
-    import sys
-
-    sys.modules.setdefault("numpy._core", numpy_core)
-    for name in ("numeric", "multiarray", "umath", "fromnumeric", "_multiarray_umath"):
-        try:
-            module = importlib.import_module(f"numpy.core.{name}")
-        except ImportError:
-            continue
-        sys.modules.setdefault(f"numpy._core.{name}", module)
-
-
-def install_gym_compat_shim() -> None:
-    """Alias the legacy ``gym`` package to ``gymnasium`` so old SB3-zoo pickles load.
-
-    RL-Zoo checkpoints trained on the ``-v1`` Fetch envs were pickled with OpenAI
-    ``gym`` and reference ``gym.spaces.*`` classes. We map those module paths onto
-    ``gymnasium`` (which has the same submodule layout) so unpickling resolves.
-    """
-    import importlib
-    import sys
-
-    try:
-        import gymnasium
-    except ImportError:
-        return
-    sys.modules.setdefault("gym", gymnasium)
-    for sub in ("spaces", "spaces.box", "spaces.dict", "spaces.discrete",
-                "spaces.multi_discrete", "spaces.multi_binary", "spaces.tuple",
-                "spaces.space", "spaces.utils"):
-        try:
-            sys.modules.setdefault(f"gym.{sub}", importlib.import_module(f"gymnasium.{sub}"))
-        except ImportError:
-            continue
 
 
 class Policy(Protocol):
@@ -107,60 +64,6 @@ class ScriptedGoalPolicy:
         rng = np.random.default_rng(0)
         action = scripted_action(obs, self.action_dim, self.gain, self.controller, env, rng)
         return np.clip(action, env.action_space.low, env.action_space.high).astype(np.float32)
-
-
-class SB3Policy:
-    """Wraps a Stable-Baselines3 / sb3-contrib checkpoint (TQC/DDPG/SAC/TD3/PPO) as a policy.
-
-    ``env`` must be supplied for HER checkpoints (e.g. the RL-Zoo Fetch models),
-    whose ``HerReplayBuffer`` requires an environment at load time.
-    """
-
-    def __init__(self, path: Path, name: str = "sb3", env=None) -> None:
-        from stable_baselines3 import DDPG, PPO, SAC, TD3
-
-        patch_numpy_pickle_aliases()
-        install_gym_compat_shim()
-        self.name = name
-        # Override pickled schedules/buffers that don't survive version/Python
-        # changes; none of them are needed for deterministic inference.
-        custom_objects = {
-            "action_noise": None,
-            "replay_buffer": None,
-            # Drop the (HER) replay buffer entirely: not needed for inference and
-            # its saved kwargs (e.g. ``online_sampling``) are stale across versions.
-            "replay_buffer_class": None,
-            "replay_buffer_kwargs": {},
-            "_last_obs": None,
-            "_last_episode_starts": None,
-            "_vec_normalize_env": None,
-            "learning_rate": 0.0,
-            "lr_schedule": lambda _: 0.0,
-            "clip_range": lambda _: 0.0,
-            "exploration_schedule": lambda _: 0.0,
-        }
-        algos = [DDPG, SAC, TD3, PPO]
-        try:
-            # TQC (sb3-contrib) is the RL-Zoo algorithm behind the strongest
-            # pretrained Fetch checkpoints; try it first when available.
-            from sb3_contrib import TQC
-
-            algos.insert(0, TQC)
-        except ImportError:
-            pass
-        errors = []
-        for cls in algos:
-            try:
-                self.model = cls.load(path, env=env, custom_objects=custom_objects)
-                self.name = f"{name}_{cls.__name__.lower()}"
-                return
-            except Exception as exc:  # pragma: no cover - depends on external checkpoints.
-                errors.append(f"{cls.__name__}: {exc}")
-        raise RuntimeError(f"Could not load SB3 checkpoint {path}: {'; '.join(errors)}")
-
-    def act(self, obs: dict[str, np.ndarray], env) -> np.ndarray:
-        action, _ = self.model.predict(obs, deterministic=True)
-        return np.asarray(action, dtype=np.float32)
 
 
 class JEPAMPCPolicy(
@@ -746,9 +649,10 @@ def rollout_policy(
     episodes: int,
     seed: int,
     video_path: Path | None = None,
+    video_episodes: int = 1,
     fps: int = 30,
 ) -> dict[str, float | str]:
-    """Run a policy for ``episodes`` episodes and return aggregate metrics, optionally recording a video."""
+    """Run a policy and optionally concatenate the first N episodes into one video."""
     successes = []
     final_distances = []
     episode_lengths = []
@@ -760,7 +664,8 @@ def rollout_policy(
         obs, _ = env.reset(seed=seed + episode_idx)
         if hasattr(policy, "reset"):
             policy.reset()
-        if video_path is not None and episode_idx == 0:
+        capture_video = video_path is not None and episode_idx < video_episodes
+        if capture_video:
             frame = env.render()
             if frame is not None:
                 frames.append(frame)
@@ -777,7 +682,7 @@ def rollout_policy(
             prev_action = np.array(action, copy=True)
             obs, _, terminated, truncated, final_info = env.step(action)
             steps += 1
-            if video_path is not None and episode_idx == 0:
+            if capture_video:
                 frame = env.render()
                 if frame is not None:
                     frames.append(frame)
@@ -818,9 +723,6 @@ def make_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--env-id", default=None)
     parser.add_argument("--output-root", type=Path, default=Path("runs"))
     parser.add_argument("--model-path", type=Path, default=None)
-    parser.add_argument("--sb3-path", type=Path, default=None, help="Optional pre-trained SB3 .zip checkpoint.")
-    parser.add_argument("--hf-sb3-repo", default=None, help="Optional Hugging Face repo id for an SB3 checkpoint.")
-    parser.add_argument("--hf-sb3-filename", default="best_model.zip")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--max-episode-steps", type=int, default=None)
@@ -920,12 +822,6 @@ def main() -> None:
     if env_spec != spec:
         raise ValueError(f"Model spec {spec} does not match env spec {env_spec}.")
 
-    sb3_path = args.sb3_path
-    if args.hf_sb3_repo is not None:
-        from huggingface_hub import hf_hub_download
-
-        sb3_path = Path(hf_hub_download(repo_id=args.hf_sb3_repo, filename=args.hf_sb3_filename))
-
     policy_net = None
     if args.policy_path is not None:
         policy_net, _ = load_policy_artifact(args.policy_path, device)
@@ -1005,22 +901,6 @@ def main() -> None:
         )
     else:
         policies.append(JEPAMPCPolicy(**mpc_kwargs))
-    sb3_error = None
-    if sb3_path is not None:
-        try:
-            policies.append(SB3Policy(sb3_path))
-        except Exception as exc:
-            sb3_error = str(exc)
-            print(
-                json.dumps(
-                    {
-                        "event": "sb3_load_failed",
-                        "path": str(sb3_path),
-                        "error": sb3_error,
-                    }
-                )
-            )
-
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for policy in policies:
@@ -1061,17 +941,6 @@ def main() -> None:
         print(json.dumps(row, default=str))
 
     with args.out.open("w", encoding="utf-8") as f:
-        if sb3_error is not None:
-            f.write(
-                json.dumps(
-                    {
-                        "event": "sb3_load_failed",
-                        "path": str(sb3_path),
-                        "error": sb3_error,
-                    }
-                )
-                + "\n"
-            )
         for row in rows:
             f.write(json.dumps(row, default=str) + "\n")
     print(json.dumps({"event": "saved_eval", "path": str(args.out)}))

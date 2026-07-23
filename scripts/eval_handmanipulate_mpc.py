@@ -1,12 +1,12 @@
 """Goal-conditioned latent MPC for the Shadow Hand HandManipulate suite.
 
 Pure SSL control: a DexterousJEPA world model (trained self-supervised on
-exploration, no demos, no RL) plus the env-provided target object pose. At each
+exploration and no demos) plus the env-provided target object pose. At each
 step, CEM over action sequences: roll candidates through the world model, decode
 the predicted object pose (achieved_goal slice) via the state probe, and score
 distance to the desired object pose. Execute the first action(s), replan (MPC).
 
-HandManipulate is an RL-hard benchmark (Dactyl used massive-scale RL); this is
+HandManipulate is a difficult dexterous-control benchmark; this is
 the principled demo-free SSL controller for it, reported honestly.
 """
 from __future__ import annotations
