@@ -36,6 +36,9 @@ and are documented in
 
 ## What Is Inside
 
+- [`runs/CHECKPOINTS.md`](runs/CHECKPOINTS.md): the canonical inference
+  artifacts, their exact payloads and dependencies, per-file sizes, integrity
+  status, and task-specific download instructions.
 - `jepa_robotics/train.py`: collects trajectories, trains the JEPA world model,
   and writes a checkpoint/model artifact.
 - `jepa_robotics/train_policy.py`: historical behaviour-cloned goal-conditioned
@@ -133,8 +136,10 @@ and are documented in
 - `docs/`: architecture/status notes and the experiment ledger for failed or
   unresolved directions.
 
-Experiment outputs are intentionally ignored by Git. Checkpoints, videos, logs,
-and JSONL eval files are written under `runs/` by default.
+Generated checkpoints, videos, logs, and JSONL evaluations are written under
+`runs/` by default and normally ignored. The canonical inference checkpoints
+and selected evidence are the deliberate exceptions; their contents are
+documented in [`runs/CHECKPOINTS.md`](runs/CHECKPOINTS.md).
 
 ## SSL Controller Status
 
@@ -680,7 +685,9 @@ Example:
 CONDA_ENV=myenv sbatch scripts/train_fetchreach_rollout.slurm
 ```
 
-Outputs are written under `runs/` and ignored by Git.
+Outputs are written under `runs/`. Generated experiments are ignored by
+default; the curated inference set is versioned as described in
+[`runs/CHECKPOINTS.md`](runs/CHECKPOINTS.md).
 
 ## Task Notes
 
@@ -705,8 +712,9 @@ Outputs are written under `runs/` and ignored by Git.
   Pen by a raw+latent future-conditioned flow prior, and Relocate by dual
   possession-specialist inverses. Explore
   world-model artifacts are merged under each task as
-  `runs/adroit_*/explore`; canonical
-  `runs/adroit_*/checkpoints/*_jepa_model.pt` links point at those checkpoints.
+  `runs/adroit_*/explore`; canonical inference artifacts are copied as real
+  files into `runs/adroit_*/checkpoints/` so they do not depend on mutable
+  experiment folders.
 
 ### Offline demos (Adroit / AntMaze)
 

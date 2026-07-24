@@ -8,8 +8,10 @@ The repo is now organized around a simple boundary:
 - `scripts/` is the CLI layer, split into `data/`, `train/`, and `eval/`.
   Scripts may parse arguments, load checkpoints, launch loops, and write
   artifacts; they must not be imported as algorithm libraries.
-- `runs/` is artifact storage. It is intentionally outside source control except
-  for small notes/videos that are already present in the working tree.
+- `runs/` is artifact storage. Most experiment output remains outside source
+  control; the curated inference-only checkpoint set, notes, and selected
+  videos are versioned. See `runs/CHECKPOINTS.md` for the payload and dependency
+  of every retained `.pt` file.
 - `docs/` holds project status, experiment ledgers, and design notes. `CLAUDE.md`
   is now kept as a concise agent operating guide.
 
@@ -85,6 +87,6 @@ Adroit explore artifacts were merged under their task directories:
 - `runs/adroit_pen/explore`
 - `runs/adroit_relocate/explore`
 
-Explore runs live only under `runs/adroit_*/explore`. Canonical JEPA model
-symlinks live in each task's `checkpoints/`
-directory.
+Explore runs live only under `runs/adroit_*/explore`. Canonical inference
+artifacts are real files in each task's `checkpoints/` directory; they are not
+symlinks into mutable experiment folders.
