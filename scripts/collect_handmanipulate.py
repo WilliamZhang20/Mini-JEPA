@@ -33,6 +33,12 @@ def main() -> None:
     p.add_argument("--ou-theta", type=float, default=0.15, help="OU mean-reversion (lower = more temporally correlated)")
     p.add_argument("--ou-sigma", type=float, default=0.3, help="OU noise scale")
     p.add_argument("--action-scale", type=float, default=1.0)
+    p.add_argument(
+        "--action-slew-limit",
+        type=float,
+        default=0.0,
+        help="Maximum per-step change per actuator after OU sampling (0 disables).",
+    )
     p.add_argument("--seed", type=int, default=7)
     args = p.parse_args()
 
@@ -43,6 +49,7 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
 
     episodes: list[Episode] = []
+    action_delta_sq: list[float] = []
     total = 0
     ep_i = 0
     while total < args.num_steps:
@@ -50,11 +57,21 @@ def main() -> None:
         states = [flatten_obs(obs)]
         actions = []
         a = np.zeros(spec.action_dim, dtype=np.float32)  # OU state
+        prev_act = np.zeros(spec.action_dim, dtype=np.float32)
         term = trunc = False
         while not (term or trunc) and total < args.num_steps:
             # Ornstein-Uhlenbeck correlated exploration
             a = a + args.ou_theta * (-a) + args.ou_sigma * rng.standard_normal(spec.action_dim).astype(np.float32)
             act = np.clip(a * args.action_scale, lo, hi).astype(np.float32)
+            if args.action_slew_limit > 0:
+                delta = np.clip(
+                    act - prev_act,
+                    -args.action_slew_limit,
+                    args.action_slew_limit,
+                )
+                act = np.clip(prev_act + delta, lo, hi).astype(np.float32)
+            action_delta_sq.append(float(np.mean(np.square(act - prev_act))))
+            prev_act = act
             obs, _, term, trunc, _ = env.step(act)
             actions.append(act)
             states.append(flatten_obs(obs))
@@ -66,7 +83,15 @@ def main() -> None:
             print(json.dumps({"event": "collect", "steps": total, "target": args.num_steps, "episodes": len(episodes)}), flush=True)
     env.close()
     save_episodes_npz(args.out, episodes, spec)
-    print(json.dumps({"event": "collected", "task": args.task, "episodes": len(episodes), "steps": total, "out": str(args.out)}), flush=True)
+    print(json.dumps({
+        "event": "collected",
+        "task": args.task,
+        "episodes": len(episodes),
+        "steps": total,
+        "action_delta_rms": float(np.sqrt(np.mean(action_delta_sq))),
+        "action_slew_limit": args.action_slew_limit,
+        "out": str(args.out),
+    }), flush=True)
 
 
 if __name__ == "__main__":

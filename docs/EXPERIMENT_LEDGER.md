@@ -794,6 +794,24 @@ scripted.
 
 ## HandManipulate (Shadow Hand in-hand reorientation)
 
+### Smooth iCEM and continuous-touch Block (2026-07-23)
+
+- Added action-delta and jerk reporting to both Shadow planners.
+- Soft action-delta costs alone reduced jitter by only about 5% and large
+  weights harmed rotation, so that approach was rejected.
+- The retained change projects every iCEM candidate through a
+  previous-action-conditioned actuator slew constraint before JEPA prediction
+  and ranking. At limit 0.35, RotateZ keeps the same 1/9 success over seed
+  blocks 60000/61000/62000 while action-delta RMS falls from roughly 0.50 to
+  0.22 and action-jerk RMS from roughly 0.75 to 0.29.
+- Added `HandManipulateBlock_ContinuousTouchSensors-v1`: 60k reward-free smooth
+  OU transitions, 92 tactile channels, dedicated contact-consistency loss.
+- Scalar taxel tokenization scored 2.357 median terminal goal cost over five
+  episodes. Grouping the sensors into 17 anatomical palm/phalanx tokens
+  improved this to 2.023 with a 7.19M-parameter model, but both were 0/5 and
+  the no-touch model scored 1.867. Touch helps the representation architecture;
+  it does not yet solve the full-pose controller.
+
 Demo-free SSL on the `handmanipulate_block_rotate_z` stepping stone (single-axis
 Z rotation, position ignored, success = rotation < 0.1 rad). 150k-step OU
 exploration only; no reward, no demos. New task preset in `jepa_robotics/tasks.py`.

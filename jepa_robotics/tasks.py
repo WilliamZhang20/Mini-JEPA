@@ -115,6 +115,18 @@ TASKS = {
         max_episode_steps=100,
         horizons="1,2,4,8,16",
     ),
+    # Same random-position/random-XYZ block reorientation task with 92
+    # continuous tactile channels appended to the proprioceptive observation.
+    # The richer force signal is preferable to the Boolean variant for learning
+    # contact transitions and later object/skill adaptation.
+    "handmanipulate_block_touch": TaskConfig(
+        name="handmanipulate_block_touch",
+        env_id="HandManipulateBlock_ContinuousTouchSensors-v1",
+        slug="handmanipulate_block_touch",
+        controller="none",
+        max_episode_steps=100,
+        horizons="1,2,4,8,16",
+    ),
     "handmanipulate_egg": TaskConfig(
         name="handmanipulate_egg",
         env_id="HandManipulateEgg-v1",

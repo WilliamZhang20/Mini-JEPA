@@ -43,6 +43,7 @@ not a restriction on the source of observed behavior.
 | FrankaKitchen | Four-task SSL solved; reordered/all-task generalization in progress | demo-handoff graph + live demo re-locking + all-task completion probe: 0.80/100 on a scrambled four-task request across four fresh seeds; full-7 remains open |
 | HandManipulate Block/Egg (full) | Open, controller-bound | demo-free SSL; WM solved, but MPC/flow controllers ~0 on full-pose (see ledger) |
 | HandManipulateBlockRotateZ (stepping stone) | Open, ~0.05-0.10 demo-free SSL | geodesic-supervised DexterousJEPA (7.9° H=8) + future-conditioned flow; flow breaks the finger-gaiting regrasp ceiling (65° sustained rotation) but directed control caps ~30-40° closed; fine CEM converts a minority of episodes. Stronger models (DiT/CFG/rotation-weighted/self-goaling) did not crack directional chaining |
+| HandManipulateBlock + continuous touch | Open, controller-bound | 60k-step reward-free tactile dataset + 17-patch anatomical tactile JEPA; grouped tactile encoding improves median goal cost 2.357 → 2.023 but remains 0/5 |
 
 ## Replacement Rules
 
@@ -69,6 +70,18 @@ not a restriction on the source of observed behavior.
   manipulation.
 
 ## Current Open Problems
+
+- **Shadow Hand smoothness/tactile Block (2026-07-23):** iCEM now constrains
+  candidates relative to the previously executed action before world-model
+  scoring. Across three RotateZ seed blocks it preserves 1/9 success while
+  reducing action-delta RMS about 0.50 → 0.22 and jerk about 0.75 → 0.29.
+  The continuous-touch Block variant adds 92 taxels and a grouped encoder with
+  17 anatomical palm/phalanx patches (93 total tokens instead of 168). It beats
+  scalar tactile tokenization on median terminal goal cost (2.023 vs 2.357)
+  but remains unsolved and slightly worse than no-touch Block (1.867). The
+  checkpoint is retained because it is the correct base for future
+  cross-object/contact adaptation, not because tactile sensing alone fixed the
+  long-horizon controller.
 
 - **Adroit Relocate residual tail:** replacement is accepted. The strongest
   SSL controller is a dual possession-specialist inverse: a reach specialist and

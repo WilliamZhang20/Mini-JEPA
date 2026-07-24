@@ -606,6 +606,7 @@ def load_jepa_artifact(path: Path, device: torch.device):
         from .models import DexterousJEPA
 
         cd = config.get("contact_dims")
+        token_groups = config.get("token_groups")
         model = DexterousJEPA(
             state_dim=spec.state_dim,
             action_dim=spec.action_dim,
@@ -617,6 +618,10 @@ def load_jepa_artifact(path: Path, device: torch.device):
             max_horizon=int(config["max_horizon"]),
             ensemble_heads=int(config.get("ensemble_heads", 1)),
             contact_dims=tuple(cd) if cd else None,
+            token_groups=(
+                tuple(tuple(int(value) for value in group) for group in token_groups)
+                if token_groups else None
+            ),
         ).to(device)
         model.load_state_dict(artifact["model"])
         model.eval()

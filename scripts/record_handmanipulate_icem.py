@@ -41,6 +41,9 @@ def main() -> None:
     p.add_argument("--beta", type=float, default=2.5)
     p.add_argument("--disagree-weight", type=float, default=-0.5)
     p.add_argument("--fine-deg", type=float, default=12.0)
+    p.add_argument("--action-l2-weight", type=float, default=0.0)
+    p.add_argument("--action-delta-weight", type=float, default=0.0)
+    p.add_argument("--slew-limit", type=float, default=0.0)
     p.add_argument("--device", default="auto")
     args = p.parse_args()
 
@@ -55,7 +58,10 @@ def main() -> None:
     mpc = ICEM(wm, norm, spec, dev, H=H, N=args.candidates, iters=args.iters, elite_frac=0.1,
                init_std=0.5, beta=args.beta, keep_frac=0.3, exec_k=args.exec_k,
                disagree_w=args.disagree_weight, reset_w=0.0, path_w=0.25,
-               fine_deg=args.fine_deg, fine_H=2, fine_N=128)
+               fine_deg=args.fine_deg, fine_H=2, fine_N=128,
+               action_l2_w=args.action_l2_weight,
+               action_delta_w=args.action_delta_weight,
+               slew_limit=args.slew_limit)
     mpc.fine_kappa = 0.0
     ag, dgo = spec.obs_dim, spec.obs_dim + spec.goal_dim
 

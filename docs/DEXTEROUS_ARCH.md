@@ -14,6 +14,11 @@ live in `jepa_robotics/models/dexterous.py`:
   token. Self-attention therefore models **joint↔joint↔object↔contact**
   interactions explicitly — the structure in-hand manipulation needs — instead
   of an MLP's dense mash.
+- **Anatomical tactile tokenization.** Touch-enabled Shadow Hand observations
+  append 92 taxels. `token_groups` maps them into 17 palm/phalanx patches while
+  leaving proprioception, object pose, and goals scalar-tokenized. The
+  Block-touch encoder therefore uses 93 tokens rather than 168 without dropping
+  a sensor.
 - **Causal transformer latent dynamics.** Sequence `[z, a_0..a_{H-1}]` with a
   causal mask; the output at step *i* predicts the latent after `a_0..a_i`
   (verified: perturbing `a_{H-1}` leaves step-0's rollout latent unchanged,
@@ -58,6 +63,31 @@ The `DexterousFlowPrior` is a drop-in for `EpsNet` in the future-conditioned
 flow trainers (`train_flat_future_flow.py`) via its matching forward signature;
 pass `action_dim` and `chunk_dim=H*action_dim` at construction.
 
-Both were verified end-to-end on CPU (shapes, causal mask, ensemble
-disagreement, flow train step + sampler round-trip, and full
-train→save→`load_jepa_artifact`→planner-ops). GPU training/eval is pending.
+Both were verified end-to-end (shapes, causal mask, ensemble disagreement,
+flow train step + sampler round-trip, and full
+train→save→`load_jepa_artifact`→planner-ops).
+
+## Smooth contact planning and tactile Block
+
+The Shadow videos exposed discontinuities at iCEM replan boundaries. Colored
+noise makes each sampled plan smooth internally, but does not constrain the
+first action of the next plan relative to the command just executed. The shared
+planning objective now projects every candidate onto a previous-action
+conditioned actuator-rate constraint *before* JEPA rollout scoring. This is not
+an output-only visual filter: the world model scores the exact feasible smooth
+trajectory that the hand executes.
+
+On three independent RotateZ seed blocks (3 episodes each), a 0.35
+per-actuator step limit plus a small 0.02 delta cost retained the baseline
+success count (1/9), reduced action-delta RMS from roughly 0.50 to 0.22, and
+reduced command-jerk RMS from roughly 0.75 to 0.29. Median gap improved on the
+hard 61000 block (118.8° to 61.3°) and on 62000 (24.9° to 13.4°).
+
+`handmanipulate_block_touch` targets
+`HandManipulateBlock_ContinuousTouchSensors-v1`. Its reward-free dataset has
+60,000 smooth OU steps and 92 continuous touch channels. The anatomically
+grouped 7.19M-parameter JEPA improved five-episode median terminal goal cost
+from 2.357 (scalar-taxel JEPA) to 2.023, but did not solve full Block (0/5) and
+still trailed the no-touch model's 1.867. This is a useful representation
+improvement and an honest controller-bound negative, not a tactile success
+claim.

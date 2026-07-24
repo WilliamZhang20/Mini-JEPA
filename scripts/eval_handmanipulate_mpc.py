@@ -25,16 +25,21 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 
 from jepa_robotics.envs import flatten_obs, make_env, obs_spec_from_env
 from jepa_robotics.evaluate import load_jepa_artifact
+from jepa_robotics.algos.planning.objectives import CommonScoringMixin
 from jepa_robotics.tasks import resolve_task
 
 
-class LatentMPC:
+class LatentMPC(CommonScoringMixin):
     def __init__(self, wm, norm, spec, dev, horizon, candidates, iters, elite_frac,
-                 init_std, exec_k, disagree_weight):
+                 init_std, exec_k, disagree_weight, action_l2_weight=0.0,
+                 action_delta_weight=0.0, slew_limit=0.0):
         self.wm, self.norm, self.spec, self.dev = wm, norm, spec, dev
         self.H, self.N, self.iters = horizon, candidates, iters
         self.elite = max(1, int(candidates * elite_frac))
         self.init_std, self.exec_k, self.disagree_w = init_std, exec_k, disagree_weight
+        self.action_l2_weight = action_l2_weight
+        self.action_delta_weight = action_delta_weight
+        self.slew_limit = slew_limit
         self.ag_lo = spec.obs_dim                      # achieved_goal slice in flat state
         self.ag_hi = spec.obs_dim + spec.goal_dim
         self.dg_lo = spec.obs_dim + spec.goal_dim      # desired_goal slice
@@ -43,6 +48,7 @@ class LatentMPC:
 
     def reset(self):
         self._buf = []
+        self.prev_action = np.zeros(self.spec.action_dim, dtype=np.float32)
 
     @torch.no_grad()
     def _plan(self, raw, env):
@@ -63,6 +69,7 @@ class LatentMPC:
         for _ in range(self.iters):
             eps = torch.randn(self.N, self.H, A, device=self.dev)
             acts = (mean.unsqueeze(0) + std.unsqueeze(0) * eps).clamp(lo, hi)
+            acts = self._rate_limit_actions(acts)
             roll = self.wm.predict_rollout(z.expand(self.N, -1), acts, self.H)  # [N,H,latent]
             pred = self.norm.decode_tensor(self.wm.state_probe(roll))          # raw state
             pred_ag = pred[:, :, self.ag_lo:self.ag_hi]                         # [N,H,7]
@@ -80,6 +87,7 @@ class LatentMPC:
                 # would add the same scalar to every candidate and do nothing)
                 head_rolls = self.wm.rollout_heads(z.expand(self.N, -1), acts, self.H)
                 cost = cost + self.disagree_w * head_rolls.var(dim=0).mean(dim=(1, 2))
+            cost = cost + self._action_regularizers(acts)
             order = torch.argsort(cost)
             elite = acts[order[: self.elite]]
             mean, std = elite.mean(0), elite.std(0).clamp_min(0.02)
@@ -90,7 +98,18 @@ class LatentMPC:
         if not self._buf:
             plan = self._plan(flatten_obs(obs), env)
             self._buf = [plan[i].copy() for i in range(max(1, min(self.exec_k, len(plan))))]
-        return np.clip(self._buf.pop(0), env.action_space.low, env.action_space.high).astype(np.float32)
+        action = np.clip(
+            self._buf.pop(0), env.action_space.low, env.action_space.high
+        ).astype(np.float32)
+        if self.slew_limit > 0:
+            action = np.clip(
+                self.prev_action
+                + np.clip(action - self.prev_action, -self.slew_limit, self.slew_limit),
+                env.action_space.low,
+                env.action_space.high,
+            ).astype(np.float32)
+        self.prev_action = action.copy()
+        return action
 
 
 def main() -> None:
@@ -106,9 +125,14 @@ def main() -> None:
     p.add_argument("--init-std", type=float, default=0.5)
     p.add_argument("--exec-k", type=int, default=2)
     p.add_argument("--disagree-weight", type=float, default=0.0)
+    p.add_argument("--action-l2-weight", type=float, default=0.0)
+    p.add_argument("--action-delta-weight", type=float, default=0.0)
+    p.add_argument("--slew-limit", type=float, default=0.0)
     p.add_argument("--max-episode-steps", type=int, default=100)
     p.add_argument("--torch-seed", type=int, default=0)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    p.add_argument("--log-episodes", action="store_true")
+    p.add_argument("--out", type=Path, default=None)
     args = p.parse_args()
 
     dev = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available()) else (args.device if args.device != "auto" else "cpu"))
@@ -118,22 +142,61 @@ def main() -> None:
     wm, norm, spec, cfg = load_jepa_artifact(args.model_path, dev)
     env = make_env(task.env_id, seed=args.seed, max_episode_steps=args.max_episode_steps)
     mpc = LatentMPC(wm, norm, spec, dev, args.horizon, args.candidates, args.iters,
-                    args.elite_frac, args.init_std, args.exec_k, args.disagree_weight)
+                    args.elite_frac, args.init_std, args.exec_k, args.disagree_weight,
+                    args.action_l2_weight, args.action_delta_weight, args.slew_limit)
 
-    successes = []
+    successes, gaps = [], []
+    action_delta_sq, action_jerk_sq = [], []
     for ep in range(args.episodes):
         obs, _ = env.reset(seed=args.seed + ep)
         mpc.reset()
         term = trunc = False; info = {}
+        actions: list[np.ndarray] = []
         while not (term or trunc):
-            obs, _, term, trunc, info = env.step(mpc.act(obs, env))
+            action = mpc.act(obs, env)
+            actions.append(action.copy())
+            obs, _, term, trunc, info = env.step(action)
         successes.append(float(info.get("is_success", 0.0)))
+        raw = flatten_obs(obs)
+        achieved = raw[spec.obs_dim:spec.obs_dim + spec.goal_dim]
+        desired = raw[spec.obs_dim + spec.goal_dim:spec.obs_dim + 2 * spec.goal_dim]
+        pos = float(np.linalg.norm(achieved[:3] - desired[:3]))
+        qa = achieved[3:] / (np.linalg.norm(achieved[3:]) + 1e-9)
+        qb = desired[3:] / (np.linalg.norm(desired[3:]) + 1e-9)
+        rot = float(2.0 * np.arccos(min(1.0, abs(float(qa @ qb)))))
+        gaps.append(10.0 * pos + rot)
+        ep_actions = np.asarray(actions, dtype=np.float32)
+        deltas = np.diff(
+            np.concatenate([np.zeros((1, spec.action_dim), np.float32), ep_actions], axis=0),
+            axis=0,
+        )
+        jerks = np.diff(deltas, axis=0)
+        action_delta_sq.extend(np.square(deltas).reshape(-1).tolist())
+        action_jerk_sq.extend(np.square(jerks).reshape(-1).tolist())
+        if args.log_episodes:
+            print(json.dumps({
+                "event": "handmanipulate_mpc_episode",
+                "episode": ep,
+                "success": successes[-1],
+                "final_goal_cost": round(gaps[-1], 4),
+                "action_delta_rms": round(float(np.sqrt(np.mean(np.square(deltas)))), 4),
+                "action_jerk_rms": round(float(np.sqrt(np.mean(np.square(jerks)))), 4),
+            }), flush=True)
     env.close()
     row = {"event": "handmanipulate_mpc_eval", "task": task.name, "model_path": str(args.model_path),
            "episodes": args.episodes, "success_rate": float(np.mean(successes)),
+           "median_final_goal_cost": float(np.median(gaps)),
+           "action_delta_rms": float(np.sqrt(np.mean(action_delta_sq))),
+           "action_jerk_rms": float(np.sqrt(np.mean(action_jerk_sq))),
            "horizon": args.horizon, "candidates": args.candidates, "iters": args.iters,
-           "exec_k": args.exec_k, "disagree_weight": args.disagree_weight, "torch_seed": args.torch_seed}
+           "exec_k": args.exec_k, "disagree_weight": args.disagree_weight,
+           "action_l2_weight": args.action_l2_weight,
+           "action_delta_weight": args.action_delta_weight, "slew_limit": args.slew_limit,
+           "seed": args.seed, "torch_seed": args.torch_seed}
     print(json.dumps(row, default=str), flush=True)
+    if args.out is not None:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(row, default=str) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

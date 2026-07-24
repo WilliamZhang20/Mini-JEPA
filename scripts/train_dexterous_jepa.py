@@ -44,6 +44,15 @@ def parse_ints(s):
     return [int(x) for x in s.split(",")]
 
 
+def parse_groups(value):
+    """Parse comma-separated anatomical token slices, e.g. ``61:69,69:76``."""
+    groups = []
+    for item in value.split(","):
+        lo, hi = item.split(":")
+        groups.append((int(lo), int(hi)))
+    return groups
+
+
 def quat_geodesic_loss(pred_q: torch.Tensor, true_q: torch.Tensor) -> torch.Tensor:
     """Smooth surrogate for the rotation angle between two (raw) quaternions.
 
@@ -71,6 +80,12 @@ def main() -> None:
     p.add_argument("--heads", type=int, default=8)
     p.add_argument("--ensemble-heads", type=int, default=3)
     p.add_argument("--contact-dims", default=None, help="lo,hi raw-state slice for the contact-consistency head (e.g. 30,39 for Relocate palm-ball+ball-target)")
+    p.add_argument(
+        "--token-groups",
+        type=parse_groups,
+        default=None,
+        help="Anatomical state slices encoded as local tokens instead of one token per scalar.",
+    )
     p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument("--steps", type=int, default=60000)
     p.add_argument("--batch-size", type=int, default=256)
@@ -110,6 +125,7 @@ def main() -> None:
         norm = fit_normalizer(episodes)
     max_h = max(args.horizons)
     contact = tuple(parse_ints(args.contact_dims)) if args.contact_dims else None
+    token_groups = tuple(args.token_groups or ())
     obj = tuple(parse_ints(args.object_dims)) if args.object_dims else None  # (pos3+quat4) raw slice
     mean_t = torch.as_tensor(norm.mean, dtype=torch.float32, device=dev)
     std_t = torch.as_tensor(norm.std, dtype=torch.float32, device=dev)
@@ -130,9 +146,11 @@ def main() -> None:
         for k in arch:
             if c.get(k) is not None:
                 arch[k] = c[k]
+        if c.get("token_groups") is not None:
+            token_groups = tuple(tuple(group) for group in c["token_groups"])
     wm = DexterousJEPA(
         state_dim=spec.state_dim, action_dim=spec.action_dim, max_horizon=max_h,
-        contact_dims=contact, dropout=args.dropout, **arch,
+        contact_dims=contact, token_groups=token_groups, dropout=args.dropout, **arch,
     ).to(dev)
     if init_ckpt is not None:
         wm.load_state_dict(init_ckpt["model"])
@@ -140,7 +158,8 @@ def main() -> None:
     opt = torch.optim.AdamW(wm.parameters(), lr=args.lr, weight_decay=1e-4)
     nparams = sum(p.numel() for p in wm.parameters()) / 1e6
     print(json.dumps({"event": "dex_jepa_data", "episodes": len(ep_actions), "state_dim": spec.state_dim,
-                      "action_dim": spec.action_dim, "params_M": round(nparams, 2), "contact_dims": contact}), flush=True)
+                      "action_dim": spec.action_dim, "params_M": round(nparams, 2),
+                      "contact_dims": contact, "token_groups": token_groups}), flush=True)
 
     def sample_batch(h):
         cur, fut_seq, chunks = [], [], []
@@ -214,6 +233,7 @@ def main() -> None:
             "d_model": arch["d_model"], "enc_depth": arch["enc_depth"], "dyn_depth": arch["dyn_depth"],
             "heads": arch["heads"], "max_horizon": max_h, "ensemble_heads": arch["ensemble_heads"],
             "contact_dims": list(contact) if contact else None,
+            "token_groups": [list(group) for group in token_groups] if token_groups else None,
             "object_dims": list(obj) if obj else None,
             "lambda_pred_state": args.lambda_pred_state, "lambda_object": args.lambda_object,
         },

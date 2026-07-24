@@ -54,11 +54,36 @@ class _TokenEncoder(nn.Module):
     a learned [LATENT] summary token whose output is projected to the latent.
     """
 
-    def __init__(self, state_dim: int, latent_dim: int, d_model: int, depth: int, heads: int, dropout: float):
+    def __init__(
+        self,
+        state_dim: int,
+        latent_dim: int,
+        d_model: int,
+        depth: int,
+        heads: int,
+        dropout: float,
+        token_groups: tuple[tuple[int, int], ...] | None = None,
+    ):
         super().__init__()
         self.state_dim = state_dim
+        self.token_groups = tuple(token_groups or ())
+        grouped = {
+            index
+            for lo, hi in self.token_groups
+            for index in range(lo, hi)
+        }
+        if any(lo < 0 or hi > state_dim or lo >= hi for lo, hi in self.token_groups):
+            raise ValueError(f"Invalid token_groups={self.token_groups} for state_dim={state_dim}")
+        if sum(hi - lo for lo, hi in self.token_groups) != len(grouped):
+            raise ValueError(f"token_groups must not overlap: {self.token_groups}")
+        self.scalar_indices = tuple(index for index in range(state_dim) if index not in grouped)
         self.value = nn.Linear(1, d_model)
-        self.dim_emb = nn.Parameter(torch.randn(state_dim, d_model) * 0.02)
+        self.dim_emb = nn.Parameter(torch.randn(len(self.scalar_indices), d_model) * 0.02)
+        if self.token_groups:
+            self.group_value = nn.ModuleList(
+                nn.Linear(hi - lo, d_model) for lo, hi in self.token_groups
+            )
+            self.group_emb = nn.Parameter(torch.randn(len(self.token_groups), d_model) * 0.02)
         self.cls = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         layer = nn.TransformerEncoderLayer(
             d_model, heads, dim_feedforward=4 * d_model, dropout=dropout,
@@ -70,7 +95,17 @@ class _TokenEncoder(nn.Module):
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         b = state.shape[0]
-        tok = self.value(state.unsqueeze(-1)) + self.dim_emb.unsqueeze(0)  # [b, D, d]
+        scalar = state[:, self.scalar_indices]
+        tok = self.value(scalar.unsqueeze(-1)) + self.dim_emb.unsqueeze(0)
+        if self.token_groups:
+            group_tok = torch.stack(
+                [
+                    projection(state[:, lo:hi])
+                    for projection, (lo, hi) in zip(self.group_value, self.token_groups)
+                ],
+                dim=1,
+            )
+            tok = torch.cat([tok, group_tok + self.group_emb.unsqueeze(0)], dim=1)
         tok = torch.cat([self.cls.expand(b, -1, -1), tok], dim=1)          # [b, 1+D, d]
         out = self.tr(tok)
         return self.head(self.norm(out[:, 0]))
@@ -131,6 +166,7 @@ class DexterousJEPA(nn.Module):
         ensemble_heads: int = 1,
         dropout: float = 0.0,
         contact_dims: tuple[int, int] | None = None,
+        token_groups: tuple[tuple[int, int], ...] | None = None,
         hidden_dim: int | None = None,  # accepted for config compatibility; unused
     ) -> None:
         super().__init__()
@@ -140,8 +176,11 @@ class DexterousJEPA(nn.Module):
         self.max_horizon = max_horizon
         self.ensemble_heads = max(1, ensemble_heads)
         self.contact_dims = contact_dims
+        self.token_groups = tuple(token_groups or ())
 
-        self.encoder = _TokenEncoder(state_dim, latent_dim, d_model, enc_depth, heads, dropout)
+        self.encoder = _TokenEncoder(
+            state_dim, latent_dim, d_model, enc_depth, heads, dropout, self.token_groups
+        )
         self.target_encoder = deepcopy(self.encoder)
         self.dyn_heads = nn.ModuleList(
             _DynamicsHead(latent_dim, action_dim, d_model, dyn_depth, heads, max_horizon, dropout)

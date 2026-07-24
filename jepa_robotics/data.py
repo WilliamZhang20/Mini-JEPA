@@ -422,6 +422,9 @@ def save_episodes_npz(path, episodes: list[Episode], spec: ObsSpec | None = None
     The spec is stored so that downstream training can recover the (canonical)
     state width without re-deriving it from an env — essential for the unified
     Fetch model whose state_dim differs from any single env's."""
+    from pathlib import Path
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "states": np.array([e.states for e in episodes], dtype=object),
         "actions": np.array([e.actions for e in episodes], dtype=object),
