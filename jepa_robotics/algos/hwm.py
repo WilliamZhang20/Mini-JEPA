@@ -77,6 +77,128 @@ class SubgoalDecoder(nn.Module):
         return self.net(latent)
 
 
+class TopologyScorer(nn.Module):
+    """Predict demonstration-time distance from an abstract state to a goal.
+
+    Euclidean distance is not a valid high-level objective in a maze: the first
+    correct move around a concave wall can increase straight-line distance.
+    This scorer receives the learned HWM state plus explicit current/goal
+    geometry and regresses temporal distance using only within-trajectory future
+    pairs. It is therefore a self-supervised route potential, not a reward
+    critic.
+    """
+
+    def __init__(self, abstract_dim: int, goal_dim: int, hidden: int = 256) -> None:
+        super().__init__()
+        # z, current, goal, signed delta, absolute delta
+        input_dim = abstract_dim + 4 * goal_dim
+        self.net = MLP(
+            [input_dim, hidden, hidden, hidden, 1],
+            layer_norm=True,
+        )
+
+    def forward(
+        self,
+        latent: torch.Tensor,
+        current_pos: torch.Tensor,
+        goal_pos: torch.Tensor,
+    ) -> torch.Tensor:
+        delta = goal_pos - current_pos
+        features = torch.cat(
+            [latent, current_pos, goal_pos, delta, delta.abs()],
+            dim=-1,
+        )
+        return self.net(features).squeeze(-1)
+
+
+class CoordinateTopologyScorer(nn.Module):
+    """Topology potential using only current and goal coordinates.
+
+    This variant can rank directly sampled waypoint coordinates without asking a
+    latent dynamics model to hallucinate the waypoint's abstract state.
+    """
+
+    def __init__(self, goal_dim: int, hidden: int = 256) -> None:
+        super().__init__()
+        self.net = MLP(
+            [4 * goal_dim, hidden, hidden, hidden, 1],
+            layer_norm=True,
+        )
+
+    def forward(
+        self,
+        latent: torch.Tensor,
+        current_pos: torch.Tensor,
+        goal_pos: torch.Tensor,
+    ) -> torch.Tensor:
+        del latent
+        delta = goal_pos - current_pos
+        return self.net(
+            torch.cat([current_pos, goal_pos, delta, delta.abs()], dim=-1)
+        ).squeeze(-1)
+
+
+class GoalConditionedWaypointMemory:
+    """Retrieve locally feasible waypoints from successful demonstrations.
+
+    Every candidate is an observed local transition. Goal conditioning selects
+    transitions from trajectories solving the requested route, avoiding the
+    through-wall endpoints produced by a continuous latent decoder. This is a
+    one-step retrieval policy, not a hand-authored map or graph search.
+    """
+
+    def __init__(
+        self,
+        current: np.ndarray,
+        goals: np.ndarray,
+        waypoints: np.ndarray,
+        current_weight: float = 1.0,
+        goal_weight: float = 4.0,
+        neighbors: int = 7,
+    ) -> None:
+        self.current = np.asarray(current, dtype=np.float32)
+        self.goals = np.asarray(goals, dtype=np.float32)
+        self.waypoints = np.asarray(waypoints, dtype=np.float32)
+        self.current_weight = float(current_weight)
+        self.goal_weight = float(goal_weight)
+        self.neighbors = int(neighbors)
+        if not (
+            len(self.current) == len(self.goals) == len(self.waypoints)
+            and len(self.current) > 0
+        ):
+            raise ValueError("Waypoint memory arrays must be non-empty and aligned")
+
+    def query(self, current_pos: np.ndarray, goal_pos: np.ndarray) -> np.ndarray:
+        current_pos = np.asarray(current_pos, dtype=np.float32)
+        goal_pos = np.asarray(goal_pos, dtype=np.float32)
+        distance = (
+            self.current_weight
+            * np.square(self.current - current_pos[None]).sum(axis=1)
+            + self.goal_weight
+            * np.square(self.goals - goal_pos[None]).sum(axis=1)
+        )
+        k = min(max(1, self.neighbors), len(distance))
+        indices = np.argpartition(distance, k - 1)[:k]
+        return np.median(self.waypoints[indices], axis=0).astype(np.float32)
+
+
+class DiscreteTopologyRouter(nn.Module):
+    """Predict the next discrete region on a route to the requested goal."""
+
+    def __init__(self, region_count: int, hidden: int = 128) -> None:
+        super().__init__()
+        # normalized current xy, goal xy, and signed displacement
+        self.net = MLP([6, hidden, hidden, region_count], layer_norm=True)
+
+    def forward(
+        self, current_pos: torch.Tensor, goal_pos: torch.Tensor
+    ) -> torch.Tensor:
+        current = current_pos / 4.0
+        goal = goal_pos / 4.0
+        delta = (goal_pos - current_pos) / 8.0
+        return self.net(torch.cat([current, goal, delta], dim=-1))
+
+
 def build_macro_data(episodes, spec, normalizer, world_model, device, stride, overlap=2):
     """Encode primitive trajectory windows into frozen low-level macro data."""
     goal_start, goal_end = spec.obs_dim, spec.obs_dim + spec.goal_dim

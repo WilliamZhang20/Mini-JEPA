@@ -67,9 +67,9 @@ The FetchSlide and Kitchen pipelines are the first fully migrated vertical
 slices. Existing root scripts are being migrated incrementally; the rule above
 prevents further growth of the flat directory while preserving old commands.
 
-Retired (2026-07-10): the Dijkstra subgoal-graph maze controller
+Retired from the canonical random-pair runs (2026-07-10): the Dijkstra subgoal-graph maze controller
 (`eval_hjepa_maze.py`, `eval_hjepa2.py`, `record_hjepa_maze.py`) — replaced on
-every maze by the neural HWM flow-macro high level (`eval/eval_hjepa_hwm.py` +
+those runs by the neural HWM flow-macro high level (`eval/eval_hjepa_hwm.py` +
 `train/train_hwm_macro_flow.py`) over the directed flow walker; the Relocate
 contact-scoring experiments (`contact.py`, `train_relocate_contact_*.py`,
 `*flow_residual_refiner.py`) — all measured neutral/negative, not part of the
@@ -77,6 +77,14 @@ canonical dual-specialist controller; and the failed Kitchen latent-dynamics /
 Dreamer / latent-HWM / MPC scripts. The canonical controllers are the
 subtask-specialist inverse (Kitchen), dual possession-specialist inverse
 (Relocate), and HWM flow-macro + flow walker (mazes).
+
+Official Minari fixed-pair UMaze is the exception that forced a replacement:
+the continuous neural high level selects a wall-directed endpoint and scores
+0/100. A discrete next-region classifier distilled from map shortest paths
+produces the U-shaped route and scores 72/100 with the same walker, without map
+access at inference. The map-derived training supervision is privileged and
+must remain explicit in comparisons. See
+`docs/ANTMAZE_UMAZE_FIXED.md`.
 
 ## Runs Layout
 

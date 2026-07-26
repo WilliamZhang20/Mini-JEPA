@@ -15,7 +15,7 @@ hand:
 | base | FetchReach / Push / PickAndPlace | JEPA MPC / flow-prior+JEPA selection / inverse-prior+JEPA selection | 1.00 / 1.00 / 1.00 |
 | 1 | **FetchSlide** (ballistic strike) | goal-frame equivariant ballistic JEPA HWM | **0.853/2000** |
 | 2 | **PointMaze** UMaze / Medium / Large | **H-JEPA + inverse low level** | 1.00 / 1.00 / 1.00 |
-| 2 | **AntMaze** UMaze / Medium / Large | H-JEPA + unified conditional flow | 1.00 / 0.775 / 0.533 |
+| 2 | **AntMaze** UMaze / Medium / Large | discrete topology router / H-JEPA + unified conditional flow | official fixed 0.72 / 0.54 / 0.31 |
 | 3 | **Adroit** Door / Hammer / Pen / Relocate | SSL future-conditioned specialists | 1.00 / 1.00 / 0.90 / 0.957 |
 | 4 | **FrankaKitchen** | demo-handoff graph + live-relocking inverse specialists + learned completion | 0.80/100 reordered four-task multi-seed check; full-7 remains open |
 
@@ -32,7 +32,9 @@ and are documented in
    (Fetch reach/push, and the *high level* of the maze hierarchy) and *fails* on
    contact-rich ones (slide, Adroit) due to model exploitation.
 2. **Long-horizon tasks need hierarchy, not a longer flat plan.** A two-level
-   Hierarchical JEPA beats flat goal-conditioned control on every maze tested.
+   Hierarchical JEPA beats flat goal-conditioned control on the random-pair maze
+   evaluations. Official fixed-pair UMaze requires an explicit discrete
+   topology layer above the continuous walker.
 
 ## What Is Inside
 
@@ -152,7 +154,7 @@ latent space:
 | FetchPickAndPlace | Inverse prior + JEPA chunk selection: 1.00 over 30 episodes, mean final distance 0.011. |
 | FetchSlide | Goal-frame equivariant event HWM: 0.848 and 0.857 on independent 1000-episode blocks (0.853/2000 aggregate). |
 | PointMaze | HWM flow-macro high level + inverse/flow low level: UMaze/Medium/Large = 1.00/1.00/1.00. |
-| AntMaze | HWM flow-macro high level + unified condition-modulated flow walker; see the checked per-layout results below. |
+| AntMaze | Discrete learned router + unified walker on official UMaze; HWM flow-macro hierarchy elsewhere. Official Minari fixed-pair: 0.72/0.54/0.31. |
 | Adroit | Door 1.00/30, Hammer 1.00/30, Pen 0.90/30, Relocate 0.957/210 with future-conditioned specialists. |
 | FrankaKitchen | Demo-handoff graph + live-relocking inverse specialists + learned completion: reordered four-task 0.80/100 over four fresh seeds; full-seven remains open. |
 
@@ -228,13 +230,17 @@ recovery state, or specialist switch at runtime.
 | Maze | **Hierarchical JEPA** | Seed blocks |
 | --- | ---: | --- |
 | PointMaze UMaze / Medium / Large | **1.00 / 1.00 / 1.00** | checked per layout |
-| AntMaze UMaze | **1.00** | 1.00 / 1.00 / 1.00 (60 episodes) |
-| AntMaze Medium | **0.775** | 0.75 / 0.75 / 0.80 / 0.80 (80 episodes) |
-| AntMaze Large | **0.533** | 0.55 / 0.45 / 0.60 (60 episodes) |
+| AntMaze UMaze (random pair) | **1.00** | 1.00 / 1.00 / 1.00 (60 episodes) |
+| AntMaze Medium (random pair) | **0.775** | 0.75 / 0.75 / 0.80 / 0.80 (80 episodes) |
+| AntMaze Large (random pair) | **0.533** | 0.55 / 0.45 / 0.60 (60 episodes) |
+| AntMaze UMaze / Medium / Large (official Minari fixed pair) | **0.72 / 0.54 / 0.31** | 100 episodes per layout |
 
-The flow-macro hierarchy solves route topology; remaining Medium/Large failures
-are long-horizon locomotion stalls. The narrow block ranges are from fully
-seeded environment and flow sampling, rather than a selected rollout.
+The continuous HWM sends the ant into the center wall on Minari's fixed pair.
+A discrete next-region classifier distilled from shortest cell routes replaces
+that endpoint predictor and reaches **72/100** with the unchanged walker. It
+uses the official maze topology for training supervision but does not query the
+map at inference. A direct map-router control reaches 8/10. See
+[`docs/ANTMAZE_UMAZE_FIXED.md`](docs/ANTMAZE_UMAZE_FIXED.md).
 
 ### Tier 3 — Adroit dexterous hand (24–30-DoF): mixed
 

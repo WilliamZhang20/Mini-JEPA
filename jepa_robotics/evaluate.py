@@ -601,13 +601,39 @@ def load_jepa_artifact(path: Path, device: torch.device):
         mean=np.asarray(artifact["normalizer"]["mean"], dtype=np.float32),
         std=np.asarray(artifact["normalizer"]["std"], dtype=np.float32),
     )
-    if str(config.get("arch", "mlp")) == "dexterous":
+    if str(config.get("arch", "mlp")) in {"dexterous", "dexterous_contextual"}:
         # Tokenized transformer world model for high-DoF dexterous hands.
-        from .models import DexterousJEPA
+        from .models import ContextualDexterousJEPA, DexterousJEPA
 
         cd = config.get("contact_dims")
         token_groups = config.get("token_groups")
-        model = DexterousJEPA(
+        pose_relation_dims = config.get("pose_relation_dims")
+        object_dims = config.get("object_dims")
+        model_type = (
+            ContextualDexterousJEPA
+            if config.get("arch") == "dexterous_contextual"
+            else DexterousJEPA
+        )
+        contextual = (
+            {
+                "context_len": int(config.get("context_len", 3)),
+                "latent_difference_actions": bool(
+                    config.get("latent_difference_actions", False)
+                ),
+                "action_decoder_depth": int(
+                    config.get("action_decoder_depth", 3)
+                ),
+                "full_object_probe": bool(
+                    config.get("full_object_probe", False)
+                ),
+                "explicit_object_slot": bool(
+                    config.get("explicit_object_slot", False)
+                ),
+            }
+            if model_type is ContextualDexterousJEPA
+            else {}
+        )
+        model = model_type(
             state_dim=spec.state_dim,
             action_dim=spec.action_dim,
             latent_dim=int(config["latent_dim"]),
@@ -618,10 +644,22 @@ def load_jepa_artifact(path: Path, device: torch.device):
             max_horizon=int(config["max_horizon"]),
             ensemble_heads=int(config.get("ensemble_heads", 1)),
             contact_dims=tuple(cd) if cd else None,
+            latent_slots=int(config.get("latent_slots", 1)),
             token_groups=(
                 tuple(tuple(int(value) for value in group) for group in token_groups)
                 if token_groups else None
             ),
+            pose_relation_dims=(
+                tuple(int(value) for value in pose_relation_dims)
+                if pose_relation_dims else None
+            ),
+            state_mean=torch.as_tensor(normalizer.mean, dtype=torch.float32),
+            state_std=torch.as_tensor(normalizer.std, dtype=torch.float32),
+            object_probe_dims=(
+                tuple(int(value) for value in object_dims)
+                if config.get("object_probe", False) and object_dims else None
+            ),
+            **contextual,
         ).to(device)
         model.load_state_dict(artifact["model"])
         model.eval()
@@ -659,6 +697,7 @@ def rollout_policy(
 ) -> dict[str, float | str]:
     """Run a policy and optionally concatenate the first N episodes into one video."""
     successes = []
+    episode_returns = []
     final_distances = []
     episode_lengths = []
     action_norms = []
@@ -677,6 +716,7 @@ def rollout_policy(
         terminated = truncated = False
         final_info = {}
         steps = 0
+        episode_return = 0.0
         prev_action = None
 
         while not (terminated or truncated):
@@ -685,7 +725,8 @@ def rollout_policy(
             if prev_action is not None:
                 action_deltas.append(float(np.linalg.norm(action - prev_action)))
             prev_action = np.array(action, copy=True)
-            obs, _, terminated, truncated, final_info = env.step(action)
+            obs, reward, terminated, truncated, final_info = env.step(action)
+            episode_return += float(reward)
             steps += 1
             if capture_video:
                 frame = env.render()
@@ -693,6 +734,7 @@ def rollout_policy(
                     frames.append(frame)
 
         successes.append(float(final_info.get("is_success", 0.0)))
+        episode_returns.append(episode_return)
         if isinstance(obs, dict) and "achieved_goal" in obs and "desired_goal" in obs:
             achieved = np.asarray(obs["achieved_goal"], dtype=np.float32)
             desired = np.asarray(obs["desired_goal"], dtype=np.float32)
@@ -705,6 +747,8 @@ def rollout_policy(
         "policy": policy.name,
         "episodes": float(episodes),
         "success_rate": float(np.mean(successes)) if successes else 0.0,
+        "mean_return": float(np.mean(episode_returns)) if episode_returns else 0.0,
+        "std_return": float(np.std(episode_returns, ddof=1)) if len(episode_returns) > 1 else 0.0,
         "mean_final_distance": float(np.mean(final_distances)) if final_distances else float("nan"),
         "mean_episode_length": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
         "mean_action_norm": float(np.mean(action_norms)) if action_norms else 0.0,

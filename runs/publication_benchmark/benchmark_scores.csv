@@ -1,0 +1,39 @@
+panel,task,method,value,err_low,err_high,uncertainty,source
+AntMaze,UMaze-diverse,BC,64.75,4.32,4.32,reported SD,CORL NeurIPS 2023
+AntMaze,UMaze-diverse,CQL,53.75,2.05,2.05,reported SD,CORL NeurIPS 2023
+AntMaze,UMaze-diverse,IQL,79.50,3.35,3.35,reported SD,CORL NeurIPS 2023
+AntMaze,UMaze-diverse,ReBRAC,96.75,2.28,2.28,reported SD,CORL NeurIPS 2023
+AntMaze,UMaze-diverse,Ours,72.00,9.49,7.86,95% Wilson CI,100 frozen-checkpoint episodes; discrete router distilled from map shortest paths
+AntMaze,Medium-diverse,BC,4.75,1.09,1.09,reported SD,CORL NeurIPS 2023
+AntMaze,Medium-diverse,CQL,71.00,4.53,4.53,reported SD,CORL NeurIPS 2023
+AntMaze,Medium-diverse,IQL,83.50,1.80,1.80,reported SD,CORL NeurIPS 2023
+AntMaze,Medium-diverse,ReBRAC,91.75,2.05,2.05,reported SD,CORL NeurIPS 2023
+AntMaze,Medium-diverse,Ours,54.00,9.74,9.44,95% Wilson CI,100 frozen-checkpoint episodes
+AntMaze,Large-diverse,BC,0.75,0.43,0.43,reported SD,CORL NeurIPS 2023
+AntMaze,Large-diverse,CQL,36.25,3.34,3.34,reported SD,CORL NeurIPS 2023
+AntMaze,Large-diverse,IQL,53.00,3.00,3.00,reported SD,CORL NeurIPS 2023
+AntMaze,Large-diverse,ReBRAC,69.50,7.26,7.26,reported SD,CORL NeurIPS 2023
+AntMaze,Large-diverse,Ours,31.00,8.22,9.63,95% Wilson CI,100 frozen-checkpoint episodes
+Adroit expert,Door,BC,105.84,0.23,0.23,reported SD,CORL NeurIPS 2023
+Adroit expert,Door,CQL,59.47,25.04,25.04,reported SD,CORL NeurIPS 2023
+Adroit expert,Door,IQL,107.29,0.37,0.37,reported SD,CORL NeurIPS 2023
+Adroit expert,Door,ReBRAC,106.78,0.04,0.04,reported SD,CORL NeurIPS 2023
+Adroit expert,Door,Ours,101.46,1.43,1.43,95% CI over episodes,100 frozen-checkpoint episodes
+Adroit expert,Relocate,BC,110.31,0.36,0.36,reported SD,CORL NeurIPS 2023
+Adroit expert,Relocate,CQL,0.03,0.10,0.10,reported SD,CORL NeurIPS 2023
+Adroit expert,Relocate,IQL,110.12,0.82,0.82,reported SD,CORL NeurIPS 2023
+Adroit expert,Relocate,ReBRAC,111.14,0.23,0.23,reported SD,CORL NeurIPS 2023
+Adroit expert,Relocate,Ours,85.04,6.05,6.05,95% CI over episodes,100 frozen-checkpoint episodes
+Kitchen partial,Four-task score,BC,38.00,0.00,0.00,not reported,VanTA ICLR 2025
+Kitchen partial,Four-task score,CQL,50.10,0.00,0.00,not reported,VanTA ICLR 2025
+Kitchen partial,Four-task score,IQL,46.30,0.00,0.00,not reported,VanTA ICLR 2025
+Kitchen partial,Four-task score,VanTA,71.20,5.70,5.70,reported variability,VanTA ICLR 2025
+Kitchen partial,Four-task score,Ours,90.75,4.27,4.27,95% CI over episodes,100 frozen-checkpoint episodes
+Fetch 50-step,PickAndPlace,HER,91.97,1.63,1.63,reported variability,FAHER study 2025
+Fetch 50-step,PickAndPlace,HER+EBP,93.64,0.98,0.98,reported variability,FAHER study 2025
+Fetch 50-step,PickAndPlace,FAHER,97.00,0.66,0.66,reported variability,FAHER study 2025
+Fetch 50-step,PickAndPlace,Ours,100.00,3.70,0.00,95% Wilson CI,100 frozen-checkpoint episodes
+Fetch 50-step,Slide,HER,56.92,2.15,2.15,reported variability,FAHER study 2025
+Fetch 50-step,Slide,HER+EBP,56.04,1.95,1.95,reported variability,FAHER study 2025
+Fetch 50-step,Slide,FAHER,59.10,2.18,2.18,reported variability,FAHER study 2025
+Fetch 50-step,Slide,Ours,86.00,8.15,5.47,95% Wilson CI,100 frozen-checkpoint episodes

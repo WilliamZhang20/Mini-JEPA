@@ -79,6 +79,17 @@ def main() -> None:
     p.add_argument("--dyn-depth", type=int, default=4)
     p.add_argument("--heads", type=int, default=8)
     p.add_argument("--ensemble-heads", type=int, default=3)
+    p.add_argument(
+        "--latent-slots",
+        type=int,
+        default=1,
+        help="Number of structured latent slots; >1 enables recurrent slot dynamics.",
+    )
+    p.add_argument(
+        "--pose-relation",
+        action="store_true",
+        help="Add a raw goal-relative translation + SO(3) log-map token.",
+    )
     p.add_argument("--contact-dims", default=None, help="lo,hi raw-state slice for the contact-consistency head (e.g. 30,39 for Relocate palm-ball+ball-target)")
     p.add_argument(
         "--token-groups",
@@ -106,6 +117,17 @@ def main() -> None:
                    help="Decode the h-step predicted rollout latent back to its future state.")
     p.add_argument("--lambda-object", type=float, default=5.0,
                    help="Extra weight on the object pose in the rollout decode (pos MSE + geodesic quaternion).")
+    p.add_argument(
+        "--object-probe",
+        action="store_true",
+        help="Decode achieved pose from the first object-specialized latent slot.",
+    )
+    p.add_argument(
+        "--lambda-object-probe",
+        type=float,
+        default=5.0,
+        help="Weight for the dedicated object-slot rollout pose loss.",
+    )
     p.add_argument("--init-model", type=Path, default=None,
                    help="Warm-start weights and reuse the normalizer for cumulative on-policy world-model calibration.")
     p.add_argument("--device", default="cuda")
@@ -140,7 +162,8 @@ def main() -> None:
     # Warm-start: rebuild the model with the CHECKPOINT's architecture (not the CLI
     # defaults) so the weights load — e.g. dyn_depth/latent_dim may differ.
     arch = dict(latent_dim=args.latent_dim, d_model=args.d_model, enc_depth=args.enc_depth,
-                dyn_depth=args.dyn_depth, heads=args.heads, ensemble_heads=args.ensemble_heads)
+                dyn_depth=args.dyn_depth, heads=args.heads, ensemble_heads=args.ensemble_heads,
+                latent_slots=args.latent_slots)
     if init_ckpt is not None:
         c = init_ckpt["config"]
         for k in arch:
@@ -148,9 +171,18 @@ def main() -> None:
                 arch[k] = c[k]
         if c.get("token_groups") is not None:
             token_groups = tuple(tuple(group) for group in c["token_groups"])
+        args.pose_relation = bool(c.get("pose_relation_dims"))
+        args.object_probe = bool(c.get("object_probe", False))
+    pose_relation_dims = (
+        (spec.obs_dim, spec.obs_dim + spec.goal_dim) if args.pose_relation else None
+    )
     wm = DexterousJEPA(
         state_dim=spec.state_dim, action_dim=spec.action_dim, max_horizon=max_h,
         contact_dims=contact, token_groups=token_groups, dropout=args.dropout, **arch,
+        pose_relation_dims=pose_relation_dims,
+        state_mean=torch.as_tensor(norm.mean, dtype=torch.float32),
+        state_std=torch.as_tensor(norm.std, dtype=torch.float32),
+        object_probe_dims=obj if args.object_probe else None,
     ).to(dev)
     if init_ckpt is not None:
         wm.load_state_dict(init_ckpt["model"])
@@ -159,7 +191,10 @@ def main() -> None:
     nparams = sum(p.numel() for p in wm.parameters()) / 1e6
     print(json.dumps({"event": "dex_jepa_data", "episodes": len(ep_actions), "state_dim": spec.state_dim,
                       "action_dim": spec.action_dim, "params_M": round(nparams, 2),
-                      "contact_dims": contact, "token_groups": token_groups}), flush=True)
+                      "contact_dims": contact, "token_groups": token_groups,
+                      "latent_slots": arch["latent_slots"],
+                      "pose_relation_dims": pose_relation_dims,
+                      "object_probe": bool(args.object_probe)}), flush=True)
 
     def sample_batch(h):
         cur, fut_seq, chunks = [], [], []
@@ -211,6 +246,16 @@ def main() -> None:
             pos_mse = torch.nn.functional.mse_loss(pred_raw[:, olo:olo + 3], true_raw[:, olo:olo + 3])
             geo = quat_geodesic_loss(pred_raw[:, olo + 3:ohi], true_raw[:, olo + 3:ohi])
             loss = loss + args.lambda_object * (pos_mse + geo)
+            if args.object_probe:
+                object_norm = wm.predict_object(roll.reshape(B * h, -1))
+                object_raw = object_norm * std_t[olo:ohi] + mean_t[olo:ohi]
+                object_pos = torch.nn.functional.mse_loss(
+                    object_raw[:, :3], true_raw[:, olo:olo + 3]
+                )
+                object_geo = quat_geodesic_loss(
+                    object_raw[:, 3:], true_raw[:, olo + 3:ohi]
+                )
+                loss = loss + args.lambda_object_probe * (object_pos + object_geo)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(wm.parameters(), 1.0)
@@ -232,10 +277,14 @@ def main() -> None:
             "horizons": args.horizons, "latent_dim": arch["latent_dim"], "hidden_dim": arch["d_model"],
             "d_model": arch["d_model"], "enc_depth": arch["enc_depth"], "dyn_depth": arch["dyn_depth"],
             "heads": arch["heads"], "max_horizon": max_h, "ensemble_heads": arch["ensemble_heads"],
+            "latent_slots": arch["latent_slots"],
             "contact_dims": list(contact) if contact else None,
             "token_groups": [list(group) for group in token_groups] if token_groups else None,
             "object_dims": list(obj) if obj else None,
+            "pose_relation_dims": list(pose_relation_dims) if pose_relation_dims else None,
+            "object_probe": bool(args.object_probe),
             "lambda_pred_state": args.lambda_pred_state, "lambda_object": args.lambda_object,
+            "lambda_object_probe": args.lambda_object_probe,
         },
     }, args.out)
     print(json.dumps({"event": "dex_jepa_saved", "path": str(args.out), "params_M": round(nparams, 2)}), flush=True)

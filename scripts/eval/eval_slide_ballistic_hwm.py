@@ -118,6 +118,7 @@ def main() -> None:
     p.add_argument("--model-path", type=Path, required=True)
     p.add_argument("--hwm-path", type=Path, required=True)
     p.add_argument("--episodes", type=int, default=50)
+    p.add_argument("--max-episode-steps", type=int, default=None)
     p.add_argument("--seed", type=int, default=14000)
     p.add_argument("--uncertainty-weight", type=float, default=1.0)
     p.add_argument("--angle-limit", type=float, default=45.0)
@@ -164,7 +165,7 @@ def main() -> None:
     env = make_env(
         task.env_id,
         seed=args.seed,
-        max_episode_steps=task.max_episode_steps,
+        max_episode_steps=args.max_episode_steps or task.max_episode_steps,
         render_mode="rgb_array" if args.video_out is not None else None,
         width=args.width if args.video_out is not None else None,
         height=args.height if args.video_out is not None else None,

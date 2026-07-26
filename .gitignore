@@ -27,3 +27,4 @@ eval_results/
 slurm-*.out
 slurm-*.err
 *.log
+runs/handmanipulate_*

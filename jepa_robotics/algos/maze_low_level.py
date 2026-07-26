@@ -166,6 +166,124 @@ class LowLevelFlow:
         return np.clip(a, self.low, self.high).astype(np.float32)
 
 
+class LowLevelActionMemory:
+    """Goal-conditioned nearest-neighbor behavior retrieval.
+
+    This uses successful offline demonstration transitions as an episodic
+    low-level policy. It is useful for rare direction/posture combinations that
+    a global flow model smooths away, while remaining reward-free at runtime.
+    """
+
+    def __init__(
+        self,
+        wm_path,
+        memory_path,
+        low,
+        high,
+        device="cpu",
+        neighbors=1,
+        replan=None,
+    ):
+        import torch
+        from scipy.spatial import cKDTree
+        from jepa_robotics.evaluate import load_jepa_artifact
+
+        self._torch = torch
+        self.dev = torch.device(device)
+        self.model, self.norm, self.spec, _ = load_jepa_artifact(Path(wm_path), self.dev)
+        self.model.eval()
+        artifact = torch.load(Path(memory_path), map_location="cpu", weights_only=False)
+        self.config = artifact["config"]
+        self.feature_mean = np.asarray(artifact["feature_mean"], dtype=np.float32)
+        self.feature_std = np.asarray(artifact["feature_std"], dtype=np.float32)
+        self.feature_weight = np.asarray(artifact["feature_weight"], dtype=np.float32)
+        features = np.asarray(artifact["features"], dtype=np.float32)
+        self.actions = np.asarray(artifact["actions"], dtype=np.float32)
+        self.tree = cKDTree(features)
+        self.neighbors = max(1, int(neighbors))
+        self.replan = int(replan or self.config.get("chunk", 1))
+        self._buffer = []
+        self.low, self.high = low, high
+
+    def act(self, obs, subgoal):
+        del subgoal
+        if not self._buffer:
+            raw = flatten_obs(obs)
+            feature = (raw - self.feature_mean) / self.feature_std
+            feature = feature * self.feature_weight
+            _, indices = self.tree.query(
+                feature, k=min(self.neighbors, len(self.actions))
+            )
+            chunk = np.median(
+                self.actions[np.atleast_1d(indices)], axis=0
+            ).reshape(-1, self.actions.shape[-1])
+            self._buffer = list(chunk[: self.replan])
+        action = self._buffer.pop(0)
+        return np.clip(action, self.low, self.high).astype(np.float32)
+
+
+class LowLevelChunkBC:
+    """Deterministic proprioceptive chunk policy for a directed gait mode."""
+
+    def __init__(self, wm_path, policy_path, low, high, device="cpu", replan=None):
+        import torch
+        from jepa_robotics.evaluate import load_jepa_artifact
+        from jepa_robotics.models import MLP
+
+        self._torch = torch
+        self.dev = torch.device(device)
+        self.model, self.norm, self.spec, _ = load_jepa_artifact(Path(wm_path), self.dev)
+        artifact = torch.load(Path(policy_path), map_location=self.dev, weights_only=False)
+        config = artifact["config"]
+        self.chunk = int(config["chunk"])
+        self.action_dim = int(config["action_dim"])
+        self.emphasis_repeat = int(config["emphasis_repeat"])
+        self.agent_dims = tuple(config["agent_dims"])
+        self.goal_dims = tuple(config["goal_dims"])
+        self.net = MLP(
+            [
+                int(config["cond_dim"]),
+                int(config["hidden"]),
+                int(config["hidden"]),
+                int(config["hidden"]),
+                self.chunk * self.action_dim,
+            ],
+            layer_norm=True,
+        ).to(self.dev)
+        self.net.load_state_dict(artifact["state_dict"])
+        self.net.eval()
+        self.replan = int(replan or self.chunk)
+        self._buffer = []
+        self._last_subgoal = None
+        self.low, self.high = low, high
+
+    def act(self, obs, subgoal):
+        subgoal = np.asarray(subgoal, dtype=np.float32)
+        if (
+            not self._buffer
+            or self._last_subgoal is None
+            or np.linalg.norm(subgoal - self._last_subgoal) > 1e-6
+        ):
+            replaced = {key: np.array(value, copy=True) for key, value in obs.items()}
+            replaced["desired_goal"] = subgoal
+            state = self._torch.from_numpy(
+                self.norm.encode(flatten_obs(replaced))
+            ).unsqueeze(0).to(self.dev)
+            a_lo, a_hi = self.agent_dims
+            g_lo, g_hi = self.goal_dims
+            delta = (state[:, g_lo:g_hi] - state[:, a_lo:a_hi]).repeat(
+                1, self.emphasis_repeat
+            )
+            condition = self._torch.cat([state, delta], dim=1)
+            with self._torch.no_grad():
+                chunk = self.net(condition)[0].view(
+                    self.chunk, self.action_dim
+                ).cpu().numpy()
+            self._buffer = list(chunk[: self.replan])
+            self._last_subgoal = subgoal
+        return np.clip(self._buffer.pop(0), self.low, self.high).astype(np.float32)
+
+
 class LowLevelInverse:
     """Self-supervised inverse chunk low level: (z_t, z_subgoal) -> action chunk;
     no action labels copied at runtime."""

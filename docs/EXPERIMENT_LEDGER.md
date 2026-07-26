@@ -892,3 +892,40 @@ precision below the 5.7 deg threshold. The on-policy calibration loop did NOT bo
 ~0.05-0.10 after flow, long-horizon iCEM, and the on-policy loop. Gap to
 GC-PMPC's 70-80% not closed in a single session; their probabilistic-ensemble WM
 (variance penalty/batchnorm/2-step) + more episodes are the likely difference.
+
+### AntMaze UMaze-diverse — official fixed-pair architecture attack (2026-07-26)
+
+- Corrected the evaluation interpretation: Minari `eval_env=True` places the
+  ant and goal on opposite sides of the UMaze center wall. The earlier
+  random-pair UMaze 1.00 does not transfer; the official baseline is 0/100.
+- Evaluated topology potentials, a 17-hop macro-flow prior, direct waypoint
+  flows, demonstrated-waypoint retrieval, coherent action-chunk retrieval,
+  route-specialized residual flows, progress-conditioned flows, deterministic
+  chunk BC, and a route-trajectory repertoire. None solved the official pair;
+  no experimental checkpoint was promoted.
+- Fixed a progress-conditioning bug: auxiliary self-righting chunks had been
+  assigned the requested p90 navigation-progress token. They now receive zero
+  navigation progress. The corrected specialist became more stable but
+  remained stationary and scored 0/10.
+- Minari requires MuJoCo 3.1.1–3.1.6. Exact demonstration replay failed under
+  3.9.0 and reproduced under 3.1.6, but learned-policy and trajectory-repertoire
+  transfer from official resets still scored zero.
+- Retained a three-episode whole-maze diagnostic video at
+  `runs/antmaze_umaze/videos/antmaze_umaze_fixed_eval_latest_arch_diagnostic_multi.mp4`.
+  Raw logs and the complete variant table are in
+  `runs/antmaze_umaze/experiments/architecture_attack_20260726/`.
+- A shortest-free-cell map-router control immediately scored **8/10** with the
+  unchanged unified walker (first success at about 323 steps; 2.8% aggregate
+  flip fraction). This isolates the failure to learned high-level topology:
+  the direct/latent planners run into the center wall, while correct U-shaped
+  waypoints are executable. This oracle is diagnostic and is not included in
+  the learned-method publication score. Its whole-maze video is
+  `runs/antmaze_umaze/videos/antmaze_umaze_fixed_map_oracle_overview_multi.mp4`.
+- **Architecture replacement:** a seven-region next-waypoint classifier was
+  distilled from shortest routes on the official Minari maze, with jittered
+  current/goal coordinates. It reached 100% supervised route accuracy and
+  **72/100** official fixed-pair success (95% Wilson CI 62.51–79.86%) with the
+  unchanged unified walker; the video check was 3/3. It does not query the maze
+  at inference, but its map-derived training supervision is privileged and is
+  disclosed in the publication protocol. Canonical checkpoint:
+  `runs/antmaze_umaze/checkpoints/antmaze_umaze_discrete_topology_router.pt`.

@@ -179,6 +179,7 @@ def main() -> None:
     p.add_argument("--model-path", type=Path, required=True)
     p.add_argument("--inverse-path", type=Path, required=True)
     p.add_argument("--episodes", type=int, default=20)
+    p.add_argument("--max-episode-steps", type=int, default=None)
     p.add_argument("--seed", type=int, default=20000)
     p.add_argument("--candidates", type=int, default=1)
     p.add_argument("--noise-std", type=float, default=0.05)
@@ -198,6 +199,8 @@ def main() -> None:
     p.add_argument("--action-scale", type=float, default=1.0)
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--video-out", type=Path, default=None)
+    p.add_argument("--video-episodes", type=int, default=1,
+                   help="Number of consecutive episodes to concatenate into the video.")
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--fps", type=int, default=30)
@@ -219,7 +222,7 @@ def main() -> None:
     env = make_env(
         task.env_id,
         seed=args.seed,
-        max_episode_steps=task.max_episode_steps,
+        max_episode_steps=args.max_episode_steps or task.max_episode_steps,
         render_mode="rgb_array" if args.video_out is not None else None,
         width=args.width if args.video_out is not None else None,
         height=args.height if args.video_out is not None else None,
@@ -239,7 +242,7 @@ def main() -> None:
         phase_window=args.phase_window,
         phase_mode=args.phase_mode,
         monotone_phase=not args.no_monotone_phase,
-        max_steps=task.max_episode_steps,
+        max_steps=args.max_episode_steps or task.max_episode_steps,
         target_horizon=args.target_horizon,
         latent_weight=args.latent_weight,
         state_weight=args.state_weight,
@@ -254,6 +257,7 @@ def main() -> None:
         episodes=args.episodes,
         seed=args.seed,
         video_path=args.video_out,
+        video_episodes=min(args.video_episodes, args.episodes),
         fps=args.fps,
     )
     env.close()

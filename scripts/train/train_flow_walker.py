@@ -79,6 +79,23 @@ def main() -> None:
         help="Optional compatible flow checkpoint to continue training from.",
     )
     p.add_argument("--max-episodes", type=int, default=1200)
+    p.add_argument(
+        "--route-start",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("X", "Y"),
+        help="Optional offline specialization: retain episodes starting near this xy.",
+    )
+    p.add_argument(
+        "--route-goal",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("X", "Y"),
+        help="Optional offline specialization: retain episodes targeting near this xy.",
+    )
+    p.add_argument("--route-radius", type=float, default=1.5)
     p.add_argument("--chunk", type=int, default=8)
     p.add_argument("--steps", type=int, default=150000)
     p.add_argument("--batch-size", type=int, default=512)
@@ -92,6 +109,11 @@ def main() -> None:
     p.add_argument("--flow-blocks", type=int, default=4)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--future-goal-frac", type=float, default=0.85)
+    p.add_argument(
+        "--successful-prefix-final-goal",
+        action="store_true",
+        help="Use only successful pre-goal chunks, conditioned on the episode final goal.",
+    )
     p.add_argument("--directed", action="store_true",
                    help="Use near-future relabeling plus a progress filter for a faster, decisive gait.")
     p.add_argument("--max-relabel-h", type=int, default=60,
@@ -124,8 +146,65 @@ def main() -> None:
 
     rng = np.random.default_rng(0)
     eps = load_episodes_npz(args.episodes_npz)[: args.max_episodes]
+    if args.route_start is not None or args.route_goal is not None:
+        if args.route_start is None or args.route_goal is None:
+            p.error("--route-start and --route-goal must be provided together")
+        gs, ge = spec.obs_dim, spec.obs_dim + spec.goal_dim
+        ds, de = ge, ge + spec.goal_dim
+        route_start = np.asarray(args.route_start, dtype=np.float32)
+        route_goal = np.asarray(args.route_goal, dtype=np.float32)
+        eps = [
+            episode
+            for episode in eps
+            if np.linalg.norm(episode.states[0, gs:ge] - route_start) <= args.route_radius
+            and np.linalg.norm(episode.states[0, ds:de] - route_goal) <= args.route_radius
+        ]
+        if not eps:
+            raise RuntimeError("Route specialization selected no episodes")
+        print(
+            json.dumps(
+                {
+                    "event": "route_specialization",
+                    "episodes": len(eps),
+                    "start": route_start.tolist(),
+                    "goal": route_goal.tolist(),
+                    "radius": args.route_radius,
+                }
+            ),
+            flush=True,
+        )
     prog = None
-    if args.directed:
+    if args.successful_prefix_final_goal:
+        gs, ge = spec.obs_dim, spec.obs_dim + spec.goal_dim
+        ds, de = ge, ge + spec.goal_dim
+        prefix_states: list[np.ndarray] = []
+        prefix_chunks: list[np.ndarray] = []
+        prefix_progress: list[float] = []
+        for episode in eps:
+            states_ep, actions_ep = episode.states, episode.actions
+            goal_ep = states_ep[0, ds:de]
+            distance = np.linalg.norm(states_ep[:, gs:ge] - goal_ep[None], axis=1)
+            hits = np.flatnonzero(distance <= 0.5)
+            if not len(hits):
+                continue
+            stop = min(len(actions_ep), int(hits[0]) + 1)
+            for t in range(stop):
+                end = min(t + args.chunk, len(states_ep) - 1)
+                progress = float(distance[t] - distance[end])
+                if progress < args.min_progress:
+                    continue
+                chunk = actions_ep[t : t + args.chunk]
+                if len(chunk) < args.chunk:
+                    chunk = np.concatenate(
+                        [chunk, np.repeat(chunk[-1:], args.chunk - len(chunk), axis=0)]
+                    )
+                prefix_states.append(states_ep[t])
+                prefix_chunks.append(chunk)
+                prefix_progress.append(progress)
+        S = norm.encode(np.asarray(prefix_states, dtype=np.float32))
+        C = np.asarray(prefix_chunks, dtype=np.float32)
+        prog = np.asarray(prefix_progress, dtype=np.float32)
+    elif args.directed:
         S, C, prog = build_directed_chunks(eps, spec, norm, args.chunk, rng,
                                            max_relabel_h=args.max_relabel_h, min_progress=args.min_progress)
     else:
@@ -135,7 +214,7 @@ def main() -> None:
     progress_stats = None
     if args.progress_cond:
         if prog is None:
-            raise SystemExit("--progress-cond requires --directed (needs per-chunk realized progress).")
+            raise SystemExit("--progress-cond requires a dataset mode with realized progress.")
         progress_stats = {f"p{q}": round(float(np.percentile(prog, q)), 4) for q in (50, 75, 90, 95)}
     requested_progress = float(progress_stats["p90"]) if progress_stats is not None else None
 
@@ -176,7 +255,14 @@ def main() -> None:
             goal_pool=goal_pool,
             goal_copies=args.auxiliary_goal_copies,
         )
-        aux_cond = encode_condition(aux_states)
+        # Recovery chunks preserve posture rather than making route progress.
+        # Labeling them with the requested p90 token makes the progress control
+        # ambiguous and can collapse a "fast" request into stationary recovery.
+        aux_progress = (
+            np.zeros(len(aux_states), dtype=np.float32)
+            if args.progress_cond else None
+        )
+        aux_cond = encode_condition(aux_states, aux_progress)
         aux_chunks = torch.from_numpy(aux_actions.reshape(len(aux_actions), -1)).to(dev)
         n_aux = len(aux_cond)
     chunk_dim = Ct.shape[1]; cond_dim = cond.shape[1]; N = len(cond)

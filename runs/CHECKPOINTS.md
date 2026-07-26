@@ -109,6 +109,7 @@ both directed locomotion and auxiliary self-righting transitions.
 | `antmaze_umaze/checkpoints/antmaze_umaze_hwm_s40.pt` | 1.1 MB | 40-step HWM: `psi`, macro-action GRU, abstract macro predictor, xy subgoal decoder, and macro normalization statistics. |
 | `antmaze_umaze/checkpoints/antmaze_umaze_hwm_macroflow.pt` | 21.9 MB | EMA/online macro-flow prior that keeps high-level proposals on demonstrated feasible transitions. |
 | `antmaze_umaze/checkpoints/antmaze_umaze_flow_unified.pt` | 41.7 MB | Unified FiLM/residual low-level flow walker, progress statistics, and auxiliary-behavior mixture metadata. |
+| `antmaze_umaze/checkpoints/antmaze_umaze_discrete_topology_router.pt` | 79 KB | Seven-region next-waypoint classifier distilled from official UMaze map shortest paths; 72/100 official fixed-pair evaluation, no map query at inference. |
 | `antmaze_medium/checkpoints/antmaze_medium_jepa_model.pt` | 11.4 MB | Medium JEPA world model, normalization, environment spec, and architecture config. |
 | `antmaze_medium/checkpoints/antmaze_medium_hwm_s40.pt` | 1.1 MB | Medium 40-step HWM and macro normalization statistics. |
 | `antmaze_medium/checkpoints/antmaze_medium_hwm_macroflow.pt` | 21.9 MB | Medium EMA/online feasible macro-flow prior. |
@@ -121,6 +122,13 @@ both directed locomotion and auxiliary self-righting transitions.
 The three unified walkers learn when auxiliary recovery behavior is useful from
 the state itself. There is no hand-written runtime recovery mode or RL value
 function.
+
+**UMaze official-eval update (2026-07-26).** The continuous HWM remains the
+random-pair controller and scores 0/100 on Minari's official fixed pair. The
+discrete topology router above replaces only that high-level component and
+scores **72/100** with the unchanged unified walker. It is learned and frozen at
+inference, but its shortest-route supervision is generated from the official
+maze map; this provenance is part of the checkpoint contract.
 
 ## Adroit
 

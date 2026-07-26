@@ -33,9 +33,9 @@ not a restriction on the source of observed behavior.
 | FetchPickAndPlace | SSL replacement solved | inverse prior + JEPA chunk selection, 1.00 |
 | FetchSlide | Solved | goal-frame equivariant ballistic JEPA HWM, 0.848 + 0.857 over independent 1000-episode blocks (0.853/2000) |
 | PointMaze UMaze/Medium/Large | SSL replacement solved (Dijkstra retired) | HWM flow-macro-prior high level + directed flow walker, 1.00/1.00/1.00 (matches the legacy graph+inverse; no Dijkstra) |
-| AntMaze UMaze | SSL replacement solved | HWM flow-macro + unified condition-modulated walker, 1.00/60 (1.00/1.00/1.00) |
-| AntMaze Medium | Improved | same unified walker, progress condition 0.8, 0.775/80 (0.75/0.75/0.80/0.80) |
-| AntMaze Large | Improved | unified walker with additional auxiliary-behavior mixing, 0.533/60 (0.55/0.45/0.60) |
+| AntMaze UMaze | Discrete topology replacement accepted | Official Minari fixed-pair 72/100 with learned next-region router + unchanged unified walker; continuous HWM baseline 0/100; map-router control 8/10. |
+| AntMaze Medium | Improved | Random-pair 0.775/80; official Minari fixed-pair 0.54/100. |
+| AntMaze Large | Improved | Random-pair 0.533/60; official Minari fixed-pair 0.31/100. |
 | Adroit Door | SSL replacement solved | schedule-phase inverse, 1.00/30; old BC removed |
 | Adroit Hammer | SSL replacement solved | p4 schedule-phase inverse, 1.00/30 fresh validation; old BC removed |
 | Adroit Pen | SSL replacement solved | raw+latent future flow, 0.90/30; old BC removed |
@@ -108,15 +108,17 @@ not a restriction on the source of observed behavior.
   upgrades give the first reproducible non-zero Medium in the current env.
   (1) A **directed-motion goal-delta-emphasis flow-matching walker**
   (`train/train_flow_walker.py --directed --emphasis-repeat`) as the low level:
-  UMaze 0.85/60 (was 0.33). (2) A **HWM neural high level with a flow prior over
+  On the development random-pair protocol, UMaze 0.85/60 (was 0.33). (2) A
+  **HWM neural high level with a flow prior over
   macro-actions** (arXiv:2604.03208 + `train/train_hwm_macro_flow.py`): sampling macros
   from a flow conditioned on `(z_high, goal_xy)` keeps the macro search on the
-  feasible demonstrated manifold, fixing the Gaussian-CEM wall-crossing
-  hallucination. On Medium the high-level comparison (same directed walker) is
+  feasible demonstrated manifold, reducing Gaussian-CEM wall-crossing
+  hallucination on those sampled pairs. On Medium the high-level comparison
+  (same directed walker) is
   **flow-macro 0.39/80 > empirical graph 0.26 > Gaussian CEM 0.067** -- the
-  neural flow high level is now the best in the repo AND generalizes (no stored
-  reachability table). **This flow-macro HWM + directed flow walker is now the
-  canonical AntMaze controller across all three mazes, replacing the Dijkstra
+  neural flow high level was best in that development protocol (no stored
+  reachability table). **This flow-macro HWM + directed flow walker became the
+  canonical random-pair AntMaze controller across all three mazes, replacing the Dijkstra
   graph: UMaze 0.867/60, Medium 0.39/80, Large 0.18/60** (all first-reproducible
   or best-in-repo, fully neural). K-step macro lookahead did not help (horizon-2
   0.25 < horizon-1 0.39 — g's rollout compounds; the greedy 1-hop from feasible
@@ -127,8 +129,9 @@ not a restriction on the source of observed behavior.
   SSL walker is at its imitation-speed ceiling, so this needs faster
   demonstrations, not another knob). **PointMaze is now also fully migrated off the
   Dijkstra graph** to the same flow-macro HWM + directed flow walker paradigm
-  (U/M/L 1.00/1.00/1.00, matching the old graph+inverse), so no maze task uses
-  Dijkstra anymore. See EXPERIMENT_LEDGER for recipes and A/Bs.
+  (U/M/L 1.00/1.00/1.00, matching the old graph+inverse). The official fixed
+  UMaze correction below shows that removing discrete topology was premature
+  for that protocol. See EXPERIMENT_LEDGER for recipes and A/Bs.
 - **AntMaze unified low level (2026-07-23, reproducible):** the old solution
   correctly identified falling as the locomotion bottleneck, but encoded that
   knowledge as a torso-quaternion threshold and a separate self-righting
@@ -138,9 +141,17 @@ not a restriction on the source of observed behavior.
   model learns from state when that behavior is useful rather than receiving a
   runtime recovery flag. The old thresholds, specialist/risk networks, and
   collection scripts are removed. Fully seeded flow and environment sweeps:
-  **UMaze 1.00/60 (1.00/1.00/1.00), Medium 0.775/80
+  **random-pair UMaze 1.00/60 (1.00/1.00/1.00), Medium 0.775/80
   (0.75/0.75/0.80/0.80), Large 0.533/60 (0.55/0.45/0.60)**. This improves both
   the mean and seed-block spread over the specialist configuration.
+- **Official UMaze-diverse correction and architecture replacement (2026-07-26):** Minari's
+  `eval_env=True` fixed `r`/`g` pair is separated by the center wall. The
+  continuous HWM high level drives into that wall and scores 0/100. A diagnostic
+  shortest-free-cell map router scores 8/10 with the unchanged walker. A
+  discrete next-region classifier distilled from those cell routes then scores
+  **72/100** without querying the map at inference. Training uses explicit
+  map-shortest-path supervision and is reported as such. See
+  `docs/ANTMAZE_UMAZE_FIXED.md`.
 - **FrankaKitchen (SOLVED this session, reproducible):** the Relocate recipe
   ported directly to the sequential task closes it. Four **segment-pure
   per-subtask inverse specialists** (microwave/kettle/light switch/slide

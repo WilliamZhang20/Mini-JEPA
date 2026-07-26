@@ -42,30 +42,6 @@ evidence.
 - Preserve existing script filenames unless there is a compatibility wrapper,
   because run records cite exact commands.
 
-## Current Truth
-
-- FetchPush and FetchPickAndPlace are clean SSL latent-planning base cases:
-  future-conditioned flow/inverse action priors plus JEPA chunk selection reach
-  1.00 success.
-- Door, Hammer, and Pen have SSL replacements. Their old Adroit BC artifacts
-  were removed after fresh validation.
-- Relocate is still open but very close (gap ~0.045). Best SSL controller is a
-  dual possession-specialist inverse (reach + held specialists switched on the
-  live palm-ball predicate at a firm 0.045) tracking a demo-locked future
-  index, with input-feature emphasis on both: the reach specialist duplicates
-  the live palm-ball vector (dims 30:33) 8x to servo grasp to the live ball,
-  and the held specialist duplicates the live ball-target vector (dims 36:39)
-  8x to servo placement to the live target. 0.957/210 on held-out seeds
-  (0.955/330 over 11 seeds) vs retained BC 1.00. Remaining failures are a
-  diverse long tail (residual reach misses on outlier ball positions, residual
-  placement offset, rare mid-transport drops).
-- PointMaze is solved with H-JEPA plus SSL inverse low level on checked runs.
-- AntMaze Medium/Large remain limited by low-level locomotion reliability.
-- FrankaKitchen is open. The old 0.90 full-4 log is not reproducible; raw flow
-  around two subtasks is the current fallback.
-- FetchSlide uses the goal-frame equivariant event HWM and commit-and-coast
-  controller; the retired model-free branch is no longer part of the repo.
-
 ## Environment Notes
 
 - Use conda env `myenv`.

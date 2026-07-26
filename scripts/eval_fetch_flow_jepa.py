@@ -291,6 +291,7 @@ def main() -> None:
     p.add_argument("--subgoal-path", type=Path, default=None)
     p.add_argument("--goal-mode", choices=["final", "local"], default="local")
     p.add_argument("--episodes", type=int, default=20)
+    p.add_argument("--max-episode-steps", type=int, default=None)
     p.add_argument("--seed", type=int, default=123)
     p.add_argument("--candidates", type=int, default=32)
     p.add_argument("--exec-k", type=int, default=1)
@@ -347,7 +348,7 @@ def main() -> None:
     env = make_env(
         task.env_id,
         seed=args.seed,
-        max_episode_steps=task.max_episode_steps,
+        max_episode_steps=args.max_episode_steps or task.max_episode_steps,
         render_mode="rgb_array" if args.video_out is not None else None,
         width=args.width if args.video_out is not None else None,
         height=args.height if args.video_out is not None else None,
