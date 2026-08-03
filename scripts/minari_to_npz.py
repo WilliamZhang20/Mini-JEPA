@@ -28,7 +28,10 @@ def main() -> None:
                         "= directed demos completing >=3 of the 4 target subtasks).")
     args = p.parse_args()
 
-    os.environ.setdefault("MINARI_DATASETS_PATH", "/u5/w223zhan/jepa-mini/.cache/minari")
+    os.environ.setdefault(
+        "MINARI_DATASETS_PATH",
+        str(Path(__file__).resolve().parent.parent / ".cache" / "minari"),
+    )
     import minari
 
     ds = minari.load_dataset(args.dataset)

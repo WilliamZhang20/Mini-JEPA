@@ -676,6 +676,8 @@ def load_jepa_artifact(path: Path, device: torch.device):
         transition_depth=int(config.get("transition_depth", 1)),
         inverse_dynamics=bool(config.get("inverse_dynamics", False)),
         inverse_horizon=int(config.get("inverse_horizon", 1)),
+        latent_norm=bool(config.get("latent_norm", False)),
+        per_head_action_encoder=bool(config.get("per_head_action_encoder", False)),
     ).to(device)
     state_dict = _remap_legacy_state_dict(
         artifact["model"], str(config.get("predictor_mode", "direct"))

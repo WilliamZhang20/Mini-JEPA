@@ -25,6 +25,8 @@ class ActionConditionedJEPA(nn.Module):
         ensemble_heads: int = 1,
         inverse_dynamics: bool = False,
         inverse_horizon: int = 1,
+        latent_norm: bool = False,
+        per_head_action_encoder: bool = False,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
@@ -37,6 +39,17 @@ class ActionConditionedJEPA(nn.Module):
         self.ensemble_heads = max(1, ensemble_heads)
         self.inverse_horizon = max(1, inverse_horizon)
 
+        # Latent-space normalization. A planner rolls the predictor many steps
+        # without re-encoding a real observation, so per-step drift in latent
+        # *scale* compounds and silently miscalibrates the subgoal distance it
+        # minimizes. A parameter-free LayerNorm applied to both encoded and
+        # predicted latents pins every rollout step onto the same shell, which
+        # is what makes a step-16 latent cost comparable to the step-1 costs the
+        # model was trained on. Opt-in, so existing checkpoints still load.
+        self.latent_norm = bool(latent_norm)
+        self.latent_ln = (
+            nn.LayerNorm(latent_dim, elementwise_affine=False) if latent_norm else nn.Identity()
+        )
         self.encoder = MLP([state_dim, hidden_dim, hidden_dim, latent_dim], layer_norm=True)
         self.target_encoder = deepcopy(self.encoder)
         if predictor_mode == "direct":
@@ -65,11 +78,21 @@ class ActionConditionedJEPA(nn.Module):
                 for _ in range(self.transition_depth)
             )
             # Roadmap A (item 2): ensemble dynamics. Extra independent recurrent
-            # heads (sharing only the action encoder) give an inter-head
-            # *disagreement* signal that flags where the model is uncertain --
-            # the known fix for model-exploitation in planning, and an
-            # exploration signal for data collection. K=1 keeps the original
-            # single-head parameter layout so existing checkpoints still load.
+            # heads give an inter-head *disagreement* signal that flags where the
+            # model is uncertain -- the known fix for model-exploitation in
+            # planning, and an exploration signal for data collection. K=1 keeps
+            # the original single-head parameter layout so existing checkpoints
+            # still load.
+            #
+            # ``per_head_action_encoder`` matters more than it looks. With one
+            # shared action encoder the heads see an *identical* embedding of an
+            # action, so they cannot disagree about an action chunk they have
+            # never seen -- which is precisely the disagreement a planner needs,
+            # since it is the actions, not the states, that the optimizer pushes
+            # off-distribution. Measured on hammer: with a shared encoder the
+            # disagreement penalty fails to stop gradient planning from
+            # "beating" ground-truth chunks at any weight up to 10.
+            self.per_head_action_encoder = bool(per_head_action_encoder)
             if self.ensemble_heads > 1:
                 self.ensemble_grus = nn.ModuleList(
                     nn.GRUCell(hidden_dim + 1, latent_dim)
@@ -82,6 +105,11 @@ class ActionConditionedJEPA(nn.Module):
                     )
                     for _ in range(self.ensemble_heads - 1)
                 )
+                if self.per_head_action_encoder:
+                    self.ensemble_action_encoders = nn.ModuleList(
+                        MLP([action_dim, hidden_dim, hidden_dim], layer_norm=True)
+                        for _ in range(self.ensemble_heads - 1)
+                    )
         else:
             raise ValueError(f"Unknown predictor_mode: {predictor_mode}")
         # A wider, two-hidden-layer state decoder: accurate geometry (gripper +
@@ -113,15 +141,16 @@ class ActionConditionedJEPA(nn.Module):
 
     def encode(self, state: torch.Tensor) -> torch.Tensor:
         """Map a (normalized) state to its online latent representation."""
-        return self.encoder(state)
+        return self.latent_ln(self.encoder(state))
 
     @torch.no_grad()
     def encode_target(self, state: torch.Tensor) -> torch.Tensor:
         """Map a state to its latent using the frozen EMA target encoder (used for prediction targets)."""
-        return self.target_encoder(state)
+        return self.latent_ln(self.target_encoder(state))
 
-    def _recurrent_head(self, z, action_seq, horizon, gru, blocks):
+    def _recurrent_head(self, z, action_seq, horizon, gru, blocks, action_encoder=None):
         """Roll one recurrent dynamics head; returns ``[batch, horizon, latent]``."""
+        encode_action = action_encoder or self.action_encoder
         preds = []
         pred = z
         for i in range(horizon):
@@ -131,25 +160,29 @@ class ActionConditionedJEPA(nn.Module):
                 dtype=action_seq.dtype,
                 device=action_seq.device,
             )
-            action_emb = self.action_encoder(action_seq[:, i])
+            action_emb = encode_action(action_seq[:, i])
             gru_in = torch.cat([action_emb, step], dim=-1)
             pred = gru(gru_in, pred)
             for block in blocks:
                 pred = pred + block(torch.cat([pred, action_emb, step], dim=-1))
+            # Re-normalize each rollout step so a long rollout stays on the same
+            # latent shell as the encoder's own outputs (see ``latent_norm``).
+            pred = self.latent_ln(pred)
             preds.append(pred)
         return torch.stack(preds, dim=1)
 
     def _heads(self):
-        """Iterate (gru, transition_blocks) over the primary head and any ensemble heads."""
-        yield self.gru, self.transition_blocks
+        """Iterate (gru, transition_blocks, action_encoder) over every dynamics head."""
+        yield self.gru, self.transition_blocks, self.action_encoder
         if self.ensemble_heads > 1:
-            for gru, blocks in zip(self.ensemble_grus, self.ensemble_blocks):
-                yield gru, blocks
+            per_head = getattr(self, "ensemble_action_encoders", None)
+            for i, (gru, blocks) in enumerate(zip(self.ensemble_grus, self.ensemble_blocks)):
+                yield gru, blocks, (per_head[i] if per_head is not None else self.action_encoder)
 
     def rollout_heads(self, z: torch.Tensor, action_seq: torch.Tensor, horizon: int) -> torch.Tensor:
         """Per-head recurrent rollouts, shape ``[num_heads, batch, horizon, latent]``."""
         return torch.stack(
-            [self._recurrent_head(z, action_seq, horizon, g, b) for g, b in self._heads()],
+            [self._recurrent_head(z, action_seq, horizon, g, b, a) for g, b, a in self._heads()],
             dim=0,
         )
 

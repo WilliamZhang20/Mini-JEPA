@@ -17,6 +17,41 @@ Why it worked: Door has a stable temporal structure and a fixed articulated
 object. A progress phase plus future-conditioned inverse chunk can realize the
 same latent sequence without copying action labels at runtime.
 
+#### 2026-08-03 learned structure replaces the schedule (retained)
+
+The hammer learned-structure pipeline (world model + `LatentSubgoalNet` +
+`InversePrior` actor; see the 2026-08-02 hammer entries) was run unchanged on
+door: no phase count, no wall-clock schedule, no monotonicity rule, no demo
+bank. Fresh 30-episode evaluation, seed 64000, gymnasium-robotics 1.3.1 /
+mujoco 3.1.6, `H=4`, `exec-k=2`, `rank-horizons 2,4,8`:
+
+| controller | success |
+| --- | ---: |
+| learned subgoal + learned actor, predictor-free | **1.000** |
+| learned subgoal + actor + predictor ranking | 0.967 |
+
+| ablation (on the ranked controller) | success |
+| --- | ---: |
+| none | 0.967 |
+| predictor (random-init dynamics) | 0.900 |
+| encoder | 0.000 |
+| subgoal net | 0.133 |
+| actor | 0.000 |
+
+Reading: removing every piece of hand-supplied structure costs nothing on door
+— the learned high level plus learned actor matches the schedule-phase
+controller's 1.00/30 on the same stack. Unlike hammer, ranking contributes
+little measurable lift here: the actor's proposals are already at ceiling
+(1.000 without ranking, 0.967 with — a one-episode difference, inside noise at
+this scale), and randomizing the predictor costs only 0.067 because ranking
+rarely changes the choice. The **ranked controller is retained** regardless:
+the paradigm this repo follows is encode -> predict in latent space -> evaluate
+candidate actions with the internal world model, and a controller that executes
+proposals unverified abandons the third step for a one-episode difference. The
+predictor-free number is recorded as the ablation-style baseline it is. The old
+schedule-phase checkpoint stays in `runs/adroit_door/checkpoints/` as the
+historical artifact, mirroring hammer.
+
 ### Hammer
 
 - Direction: phase inverse priors with different phase counts and direct
@@ -33,6 +68,168 @@ Why it worked: Hammer is contact-rich, but the successful demo manifold is
 phase-ordered: reach/tool alignment, lift/position, strike. A small number of
 self-supervised phases preserves this structure directly.
 
+#### 2026-08-02 reproduction of the p4 baseline
+
+Re-running the documented command (`--phase-mode schedule --candidates 1
+--exec-k 1`, seed 64000, 30 episodes) scores **0.733/30**, not the 1.00/30
+recorded above. The environment differs from the one that produced the original
+number: gymnasium-robotics 1.3.1 / mujoco 3.1.6, and 1.3.1 warns that the Adroit
+v1 reward functions changed in 1.2.1 and that 1.2.0 is required for v1
+reproducibility. Contact-rich physics is version-sensitive and the original
+stack no longer exists on the machine, so this was not resolvable by rerunning.
+**0.733/30 on this stack is the comparison baseline** for anything measured in
+the same environment; the 1.00/30 is retained above as the historical record of
+a different stack.
+
+#### 2026-08-02 why the Adroit controllers were never predictor-based
+
+This is the measurement behind the "❌ predictor" rows in the README's runtime
+table. On held-out hammer demo transitions, where the ground-truth chunk is
+known to reach the subgoal, the model was asked to score chunks (H=8, cost =
+squared normalized latent distance to the encoded true future):
+
+| chunk | cost |
+| --- | ---: |
+| ground-truth demo chunk | 0.66 |
+| CEM best (512 candidates × 6 iterations) | 1.46 |
+| best of 512 uniform random chunks | 1.69 |
+
+Read in order, these say the predictor is a **correct ranker** — it prefers the
+true chunk to random ones — and that **sampling cannot search** a 26-actuator ×
+8-step space: CEM found a chunk the model scored as well as ground truth in 0%
+of states, and its solution was essentially uncorrelated with the true one
+(‖CEM − true‖ = 10.8 against ‖true‖ = 8.3).
+
+Gradient descent through the differentiable rollout searches perfectly well, and
+that is the problem. It reaches cost 0.31, **beating the ground-truth chunk in
+100% of states**. Reality cannot beat the demonstration at reaching the
+demonstration's own future, so every such solution is exploiting predictor
+error rather than finding better control. Closed loop it scores 0.00 with action
+delta 2.9, against 0.27 for the unplanned inverse head.
+
+Neither guard rescues it (H=8, anchored on the inverse-head proposal; the metric
+is distance to the true chunk, because an exploiting planner reports an
+excellent cost):
+
+| disagreement weight | trust region | ‖plan − true‖ | plan cost |
+| ---: | ---: | ---: | ---: |
+| — (anchor alone) | — | 3.86 | 0.65 (true chunk) |
+| 0 | 0 | 6.94 | 0.31 |
+| 0 | 0.1 | 3.97 | 0.46 |
+| 1 | 0.1 | 3.93 | 0.46 |
+| 10 | 0 | 5.44 | 0.51 |
+| 10 | 0.1 | 3.91 | 0.54 |
+
+Every row still scores below the true-chunk floor, i.e. still exploits. The only
+trust region tight enough to keep the plan near something physical (0.1) leaves
+it at the anchor's own distance — the predictor contributes nothing at that
+setting. Two consequences were acted on:
+
+1. **Architecture.** All ensemble heads shared one action encoder, so they
+   received an identical embedding of any action and could not disagree about
+   *unfamiliar actions* — which is exactly the uncertainty that would flag an
+   exploiting candidate, since the optimizer perturbs actions, not states. Each
+   head now owns an action encoder (`--shared-action-encoder` restores the old
+   layout).
+2. **Controller.** Free optimization in raw action space is the wrong use of
+   this predictor. The retained formulation ranks a set of candidates that are
+   on-manifold by construction (`--method rank`).
+
+On (1), the follow-up measurement was only partly supportive and is recorded as
+such. Disagreement on out-of-distribution actions, relative to demo actions from
+the same states:
+
+| actions | shared action encoder | per-head action encoder |
+| --- | ---: | ---: |
+| demo | 1.00x | 1.00x |
+| demo + noise 0.3 | 1.46x | 1.57x |
+| demo + noise 1.0 | 2.92x | 3.56x |
+| uniform random | 2.92x | 3.56x |
+
+The shared-encoder heads *do* separate off-distribution actions (2.92x); they
+share only the action embedding and still carry independent GRUs and transition
+blocks, so they diverge downstream. Per-head encoding improves the separation to
+3.56x and is retained, but it is an improvement, not a repair. **The failure of
+the disagreement penalty above is therefore not an artifact of the shared
+encoder** — the signal was present and the penalty still did not prevent
+exploitation. What fixed the controller was (2), not (1).
+
+#### 2026-08-02 learned structure + predictor ranking (retained)
+
+Every piece of hand-supplied structure was removed and replaced with a learned
+component, and the JEPA predictor was put back in the runtime loop:
+
+* world model — dense multi-step rollout objective, 6.84M parameters, trained on
+  5000 demos plus 400 colored-noise exploration episodes. Held-out open-loop
+  rollout is **4.46x** better than the static baseline, 2.05x at step 1 rising to
+  5.27x at step 12.
+* high level — `LatentSubgoalNet`: `z_t -> (z_{t+h}, state_{t+h}, progress)`.
+  Replaces the phase count, the wall-clock schedule, the monotonicity rule, the
+  phase window and the 50k-entry demo bank.
+* actor — `InversePrior` on `(z_t, z_goal, horizon)` only. No phase features.
+* controller — the actor is queried at several subgoal lookaheads, and the
+  **predictor ranks** the resulting chunks (plus small jitter). Every candidate
+  is on-manifold by construction, which is why this succeeds where free
+  optimization exploited the model.
+
+Fresh 30-episode evaluation, seed 64000, `H=4`, `exec-k=2`, `rank-horizons
+2,4,8`:
+
+| controller | success |
+| --- | ---: |
+| p4 phase inverse (hand structure, predictor-free) — baseline | 0.733 |
+| learned subgoal + learned actor, predictor-free | 0.733 |
+| learned subgoal + actor + **predictor ranking** | **0.833** |
+
+and the component ablations on the retained controller:
+
+| ablation | success |
+| --- | ---: |
+| none | 0.833 |
+| predictor (random-init dynamics) | 0.567 |
+| encoder | 0.000 |
+| subgoal net | 0.000 |
+| actor | 0.000 |
+
+Two conclusions. **Removing the hand-supplied structure costs nothing** — the
+learned high level plus learned actor matches the phase-scheduled baseline
+exactly at 0.733 (22/30 either way). **The predictor is load-bearing** — random
+dynamics cost 0.833 -> 0.567, and note that this is *below* the predictor-free
+0.733, because a broken predictor makes ranking actively choose bad candidates
+rather than falling back on the default. This is the first Adroit controller in
+this repo for which the JEPA predictor, not just the encoder, is required at
+runtime.
+
+Scale caveat: 25/30 vs 22/30 is roughly a one-sigma difference on its own. The
+tuning seed (20000, 10 episodes) independently showed 1.00 ranked vs 0.80
+predictor-free at the same configuration, and the predictor ablation is a large
+and unambiguous drop, so the direction is consistent across three measurements.
+
+#### 2026-08-03 five falsified improvement hypotheses (0.833 stands)
+
+Every attempt to lift hammer past 0.833 with learned components failed; each is
+recorded so it is not retried blind. Screens are tuning seed 20000 / 10
+episodes, where the retained config scores 1.00; validations are seed 64000 /
+30 episodes against the 0.833 baseline.
+
+| hypothesis | result |
+| --- | --- |
+| rectified-flow actor as candidate sampler | 0.233 validated |
+| flow at reduced temperature 0.5 / 0.3 | 0.10 / 0.20 at screen |
+| tighter replan `exec-k 1` / wider set h2-16 x16 / disagreement 0.5 | 0.90 / 0.80 / 0.90 at screen |
+| predictor-guided refiner, single-goal / goal-matched | 0.633 / 0.800 validated |
+| 48k world model (open-loop ratio 4.46 -> 4.56) + retrained stack | actor-only 0.500, ranked 0.800, refined 0.767 |
+
+Readings. Hammer's strike chunks punish any candidate diversity beyond small
+jitter: the flow actor's samples fail even near its mode, so the mode itself is
+off-manifold at this capacity. The 48k row is the instructive one — **better
+open-loop rollout does not imply a better control stack**: the longer-trained
+encoder reshaped the latent space so the actor trained on it dropped 0.733 ->
+0.500, while ranking's rescue margin widened to +0.30 (the predictor got
+stronger and the actor-latent interface got worse). The 32k stack at 0.833
+remains retained; the search/select side is saturated at this world-model
+capacity.
+
 ### Pen
 
 - Direction: raw+latent future-conditioned flow action prior.
@@ -43,6 +240,76 @@ Why it worked: Pen benefits from a stochastic action prior because in-hand
 orientation is multimodal. Adding raw current/future state to the latent
 condition preserved proprioceptive precision the compact latent alone can smooth
 away.
+
+#### 2026-08-03 learned-structure latent pipeline (recorded, below retained flow)
+
+The hammer/door learned-structure pipeline run unchanged on pen (world model 20k
+steps on the demos plus 400 colored-noise trials, learned subgoal net, latent
+actor, predictor ranking). Fresh 30 episodes, seed 64000, gymnasium-robotics
+1.3.1 / mujoco 3.1.6, `H=4`, `exec-k=2`, `rank-horizons 2,4,8`:
+
+| controller | success |
+| --- | ---: |
+| retained raw+latent flow (hand-tuned conditioning) | 0.90 |
+| learned subgoal + actor, predictor-free | 0.367 |
+| learned subgoal + actor + predictor ranking | 0.467 |
+
+| ablation (on the ranked controller) | success |
+| --- | ---: |
+| none | 0.467 |
+| predictor | 0.367 |
+| encoder | 0.033 |
+| subgoal net | 0.167 |
+| actor | 0.000 |
+
+Reading: the predictor is load-bearing (+0.10 over predictor-free; ablating it
+falls back exactly to the actor-only rate) and every learned component is
+required, but the deterministic latent-only actor sits far below the retained
+flow prior. The gap is consistent with the original pen finding above: in-hand
+reorientation is multimodal and needs the raw proprioceptive conditioning that
+a compact latent smooths away. Recorded per the validation rule; the raw+latent
+flow remains the retained pen controller.
+
+#### 2026-08-03 (later) flow actor + predictor-guided refiner: 0.467 -> 0.600
+
+Two new all-learned candidate-generation heads (`jepa_robotics/algos/priors.py`),
+both conditioned on `(z_t, z_goal, horizon)` only, no hand structure. Each step
+validated fresh at seed 64000 / 30 episodes:
+
+| latent controller | success |
+| --- | ---: |
+| deterministic actor, predictor-free | 0.367 |
+| + predictor ranking | 0.467 |
+| rectified-flow actor sampled as rank candidates (`FlowChunkActor`) | 0.500 |
+| deterministic actor + goal-matched **predictor-guided refiner** | **0.600** |
+
+The refiner (`PredictorGuidedRefiner`) makes the world model generate rather
+than only select: each candidate chunk is rolled through the frozen predictor,
+the latent goal error `z_goal - z_end` is fed back in, and a learned correction
+is applied, iterated 3x before ranking. It is trained to restore perturbed demo
+chunks, so unlike free gradient descent (which exploits predictor error, see
+the hammer entries) its update direction cannot leave the demo manifold.
+Findings, in the order they were measured:
+
+- Each candidate must be refined toward the subgoal that *generated* it.
+  Refining every candidate toward the single plan-horizon subgoal collapses the
+  lookahead diversity ranking depends on (hammer 0.833 -> 0.633, relocate
+  0.333 -> 0.033; pen still gained). The goal-matched form is the retained one.
+- Part of the refiner's pen gain is candidate diversity, not direction: a
+  random-weight refiner control scores 0.533 against the trained 0.567
+  (single-goal form). The trained direction is worth ~1 episode; the full
+  goal-matched pipeline is worth +0.133 over no refiner.
+- The result reproduces across world models: a retrained 32k-step WM stack
+  scores the identical 0.600 (predictor ablation 0.433, load-bearing), with
+  actor-only up 0.367 -> 0.467.
+- Pure world-model generation — the WM's auxiliary inverse head proposing with
+  no dedicated actor, then refine + rank — reaches only 0.300. The dedicated
+  actor is still required; the aux head is an encoder regularizer, not a policy.
+
+Retained pen *latent* controller: deterministic actor + goal-matched refiner +
+predictor ranking, 0.600/30. The raw+latent flow (0.90) remains the overall pen
+controller; the remaining 0.30 gap is the raw-proprioception precision issue
+documented above, now demonstrated to persist across two world-model scales.
 
 ### Relocate
 
@@ -367,6 +634,62 @@ Session 2026-07-09 (continued — firm-switch + placement emphasis, gap to ~0.04
   `docs/HANDOFF_RELOCATE_SSL_CONTACT.md` for next directions (emphasis/threshold
   micro-sweep with strict held-out discipline, wider demo bank for reach
   outliers, contact-consistency JEPA finetune).
+
+#### 2026-08-03 learned-structure latent pipeline (recorded, below retained specialists)
+
+The hammer/door/pen learned-structure pipeline run unchanged on relocate. Fresh
+30 episodes, seed 64000, gymnasium-robotics 1.3.1 / mujoco 3.1.6, `H=4`,
+`exec-k=2`, `rank-horizons 2,4,8`:
+
+| controller | success |
+| --- | ---: |
+| retained dual possession specialists (0.045 switch, emphasis dims) | 0.957 |
+| learned subgoal + actor, predictor-free | 0.233 |
+| learned subgoal + actor + predictor ranking | 0.333 |
+
+| ablation (on the ranked controller) | success |
+| --- | ---: |
+| none | 0.333 |
+| predictor | 0.100 |
+| encoder | 0.000 |
+| subgoal net | 0.000 |
+| actor | 0.000 |
+
+Reading: the hammer pattern reproduces — the predictor is genuinely
+load-bearing (0.333 -> 0.100 ablated, *below* the predictor-free 0.233: a
+broken predictor actively picks bad candidates) and every learned component is
+required — but a single generalist actor is nowhere near the two contact-regime
+specialists with live-geometry emphasis. The hand-supplied structure this
+pipeline removes (possession switch, emphasis dims) is exactly what carries
+relocate from ~0.33 to 0.957, so a learned replacement for the *specialist
+split*, not just the schedule, is what relocate actually needs. Recorded per
+the validation rule; the dual specialists remain the retained controller.
+
+#### 2026-08-03 (later) scale + candidate-set fix: 0.333 -> 0.733, no new structure
+
+The diagnosis above ("needs a learned specialist split") was wrong about what
+binds first. Two changes, neither adding any task structure, more than doubled
+the latent pipeline (all validations seed 64000 / 30 episodes):
+
+1. **Scale**: world model 20k -> 32k steps, subgoal 12k -> 24k, actor 15k ->
+   30k. Actor-only jumped 0.233 -> 0.733; ranked (2,4,8) 0.333 -> 0.633.
+2. **Candidate-set fix**: the h=2 lookahead subgoal feeds ranking bad
+   candidates in contact phases. Screen (seed 20000/10): `rank-horizons 4,8`
+   0.90 vs 0.60 base vs 0.70 actor-only. Validated: **0.733 ranked** with
+   predictor ablation 0.467 — ranking now costs nothing against actor-only and
+   the predictor is strongly load-bearing (-0.267 ablated).
+
+Failed variants, recorded: the predictor-guided refiner is harmful on relocate
+in both forms (0.033 single-goal, 0.067 goal-matched, vs 0.333 base) — the
+correction signal is unreliable exactly in the contact regimes it would need to
+fix; the flow actor is neutral-to-negative (0.300); and a 48k world model
+repeats the hammer scale regression (open-loop RMSE 0.948 -> 0.903 but
+actor-only 0.667, ranked 0.633 — worse closed-loop than the 32k stack).
+
+Retained relocate *latent* controller: 32k stack, ranked at horizons 4,8,
+**0.733/30**. The dual possession specialists (0.957) remain the overall
+controller; the remaining gap is now 0.22, down from 0.62, with the specialist
+split still un-replaced by anything learned.
 
 ## AntMaze And PointMaze
 

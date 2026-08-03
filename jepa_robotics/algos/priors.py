@@ -152,6 +152,121 @@ def sample_action_chunks(
     return a
 
 
+class FlowChunkActor(nn.Module):
+    """Rectified-flow prior over future-conditioned action chunks.
+
+    A deterministic inverse actor collapses a multimodal chunk distribution to
+    its conditional mean, which is exactly what fails on in-hand reorientation
+    (see the pen ledger entries). Sampling this prior yields genuinely diverse
+    on-manifold candidates for the JEPA predictor to rank, rather than one
+    proposal plus Gaussian jitter. The condition stays ``(z_t, z_goal,
+    horizon)`` only — no hand-supplied structure.
+    """
+
+    def __init__(
+        self,
+        cond_dim: int,
+        chunk_dim: int,
+        hidden: int = 512,
+        n_blocks: int = 4,
+        flow_T: int = 1000,
+        flow_steps: int = 16,
+    ) -> None:
+        super().__init__()
+        self.net = EpsNet(chunk_dim, cond_dim, hidden=hidden, n_blocks=n_blocks)
+        self.chunk_dim = chunk_dim
+        self.flow_T = flow_T
+        self.flow_steps = flow_steps
+
+    def loss(self, chunk: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """Rectified-flow matching loss on one batch of (chunk, cond) rows."""
+        noise = torch.randn_like(chunk)
+        tau = torch.rand(chunk.shape[0], device=chunk.device)
+        x = (1.0 - tau[:, None]) * noise + tau[:, None] * chunk
+        velocity = self.net(x, tau * self.flow_T, cond)
+        return nn.functional.mse_loss(velocity, chunk - noise)
+
+    @torch.no_grad()
+    def sample(
+        self, cond: torch.Tensor, n: int = 1, init_noise_scale: float = 1.0
+    ) -> torch.Tensor:
+        """Draw ``n`` chunks per cond row; returns ``[rows * n, chunk_dim]``.
+
+        ``init_noise_scale`` is a sampling temperature: 1.0 covers the full
+        conditional distribution, lower values concentrate samples near the
+        mode. Precision-critical tasks (measured: hammer) collapse under
+        full-noise samples but still benefit from mild diversity.
+        """
+        rep = cond.repeat_interleave(n, dim=0)
+        return sample_action_chunks(
+            self.net,
+            {"T": self.flow_T},
+            rep,
+            self.chunk_dim,
+            rep.device,
+            objective="flow",
+            flow_steps=self.flow_steps,
+            init_noise_scale=init_noise_scale,
+        )
+
+
+class PredictorGuidedRefiner(nn.Module):
+    """Amortized chunk correction driven by the predictor's own rollout error.
+
+    Ranking lets the world model *select* among proposals but never improve
+    them; free gradient descent improves them but exploits predictor error
+    off-manifold (measured on hammer: it "beats" ground-truth chunks that
+    reality cannot beat). This head is the middle path: the chunk is rolled
+    through the frozen predictor, the latent goal error is fed back in, and
+    the head outputs a correction *trained to land on the demonstrated
+    chunk*. The world model thereby generates actions from its own
+    evaluation, but the update direction comes from the demo manifold rather
+    than from cost gradients, so iterating it cannot chase predictor error.
+    """
+
+    def __init__(
+        self, latent_dim: int, chunk_dim: int, hidden: int = 512, n_blocks: int = 4
+    ) -> None:
+        super().__init__()
+        in_dim = 3 * latent_dim + 1 + chunk_dim
+        layers: list[nn.Module] = [nn.Linear(in_dim, hidden), nn.SiLU()]
+        for _ in range(n_blocks - 1):
+            layers += [nn.Linear(hidden, hidden), nn.SiLU()]
+        layers.append(nn.Linear(hidden, chunk_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(
+        self,
+        z: torch.Tensor,
+        z_goal: torch.Tensor,
+        z_err: torch.Tensor,
+        h_token: torch.Tensor,
+        chunk_flat: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.net(torch.cat([z, z_goal, z_err, h_token, chunk_flat], dim=-1))
+
+    @torch.no_grad()
+    def refine(
+        self,
+        wm,
+        z: torch.Tensor,
+        z_goal: torch.Tensor,
+        h_token: torch.Tensor,
+        chunk: torch.Tensor,
+        steps: int = 3,
+        action_low: float = -1.0,
+        action_high: float = 1.0,
+    ) -> torch.Tensor:
+        """Iteratively correct ``chunk [n, k, act]`` toward ``z_goal``, feeding
+        the world model's own rollout endpoint back in at every step."""
+        n, k, _ = chunk.shape
+        for _ in range(steps):
+            z_end = wm.rollout_heads(z, chunk, k).mean(dim=0)[:, -1]
+            delta = self.forward(z, z_goal, z_goal - z_end, h_token, chunk.reshape(n, -1))
+            chunk = (chunk + delta.view_as(chunk)).clamp(action_low, action_high)
+        return chunk
+
+
 def sample_chunk(
     net: nn.Module,
     ddpm: dict,

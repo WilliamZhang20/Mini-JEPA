@@ -362,6 +362,63 @@ demos; "online fine-tuning" here means the policy's own successful rollouts. Pub
 FrankaKitchen "success rates" vary by metric and setting — full-sequence vs mean-subtask, offline vs
 online — so direct cross-paper ranking needs matching the exact protocol.)*
 
+## What Each Controller Actually Uses At Runtime
+
+"JEPA-based" covers two very different things in this repo, and the headline
+table above does not distinguish them. This one does. The question it answers is
+narrow and mechanical: **when the controller picks the next action, does it call
+the JEPA predictor?**
+
+| Task | Encoder | Predictor rolled at runtime | What actually picks the action |
+| --- | :---: | :---: | --- |
+| FetchReach | ✅ | ✅ | Gradient MPC over the JEPA rollout |
+| FetchPush | ✅ | ✅ | Flow prior proposes chunks; JEPA rollout **selects** |
+| FetchPickAndPlace | ✅ | ✅ | Inverse prior proposes chunks; JEPA rollout **selects** |
+| FetchSlide | ✅ | ✅ (event-level) | Ballistic HWM predicts the post-coast endpoint of a strike macro |
+| PointMaze / AntMaze | ✅ | ✅ (high level only) | HWM predicts macro endpoints; low-level walker is a flow/inverse prior |
+| **Adroit Hammer** | ✅ | ✅ | Learned high level proposes subgoals at several lookaheads; the **predictor ranks** the actor's chunks |
+| **Adroit Door** | ✅ | ✅ | Learned high level proposes subgoals; the **predictor ranks** the actor's chunks (0.967; actor alone 1.000 — within noise, ranking retained to keep the predictor in the loop) |
+| Adroit Pen | ✅ | ❌ | `flow(a | z_t, z_future, raw)` sampled and executed |
+| Adroit Relocate | ✅ | ❌ | Two inverse specialists switched on a live contact predicate |
+| FrankaKitchen | ✅ | ❌ | Per-subtask inverse specialists + a completion probe on the latent |
+
+So the accurate claim for the Adroit suite splits by row. Hammer and Door now
+run the full encode → predict-in-latent → plan loop with zero hand-supplied
+structure: the predictor evaluates candidate chunks against a learned latent
+subgoal at every replan. On hammer the predictor is load-bearing (ablating it
+costs 0.833 → 0.567); on door the actor is already at ceiling and ranking is
+retained for paradigm conformance rather than measured lift (0.967 vs 1.000,
+one episode). The remaining ❌ rows are **"JEPA representations supporting
+contact-specialized controllers"** — the encoder is load-bearing there
+(random-encoder ablation collapses the controllers to ~0.00), the predictor is
+not yet: the learned latent pipeline currently reaches 0.600 on Pen (vs 0.90
+hand-structured) and 0.733 on Relocate (vs 0.957), with the predictor
+load-bearing in both. `docs/EXPERIMENT_LEDGER.md` records the measurements
+behind every row.
+
+## Hand-Supplied Structure
+
+Several controllers get their structure from flags rather than from data. This is
+tracked explicitly because each entry is a place where a learned component should
+be possible:
+
+| Task | Structure supplied by hand |
+| --- | --- |
+| Adroit Hammer | ~~phase count, schedule, monotone rule, demo bank~~ — **replaced by a learned high level**, at no cost in success (0.733 either way) |
+| Adroit Door | ~~phase count, wall-clock phase schedule `floor(t/T · n)`, monotone-phase rule, phase window, stored demo bank + nearest-neighbour retrieval~~ — **replaced by a learned high level**, at no cost in success (1.00 either way) |
+| Adroit Relocate | firm 0.045 palm-ball switch threshold, emphasis dims `30:33` / `36:39`, 8× emphasis repeat, two hand-split contact regimes |
+| FrankaKitchen | `--match-dims 0,9`, per-subtask emphasis dims, relock margin, subtask decomposition |
+| AntMaze UMaze (official) | next-region router distilled from the official maze map |
+| FetchSlide | scripted pre-contact alignment, goal-frame canonicalization |
+| Fetch push / pick | exact Fetch geometry side features |
+
+Hammer's and Door's rows have been replaced with a learned component; see
+`jepa_robotics/algos/latent_subgoal.py`. The same learned pipeline was measured
+on Pen (0.600/30 vs the retained flow's 0.90) and Relocate (0.733/30 vs the
+retained specialists' 0.957) — on both, the predictor and every learned
+component are load-bearing, but the generalist actor cannot yet replace the
+hand-structured specialists; the ledger records both attempts.
+
 ## What The World Model Is Good For
 
 Across all tiers, a consistent picture of where JEPA's *predictive* learning pays
